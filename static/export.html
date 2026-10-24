@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>知乎专栏导出</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="exporter.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <i data-lucide="book-down" aria-hidden="true"></i>
+      <h1>知乎专栏导出</h1>
+    </div>
+    <span id="source-badge" class="source-badge" data-state="loading">正在识别页面</span>
+  </header>
+
+  <main class="workspace">
+    <section class="column-overview" aria-labelledby="column-title">
+      <div class="column-copy">
+        <p class="section-label">当前专栏</p>
+        <h2 id="column-title">正在读取...</h2>
+        <a id="source-url" class="source-url" href="#" target="_blank" rel="noreferrer"></a>
+      </div>
+      <dl class="metrics" aria-label="导出统计">
+        <div><dt>已发现</dt><dd id="found-count">0</dd></div>
+        <div><dt>已导出</dt><dd id="saved-count">0</dd></div>
+        <div><dt>未完成</dt><dd id="failed-count">0</dd></div>
+      </dl>
+    </section>
+
+    <section class="progress-area" aria-labelledby="state-label">
+      <div class="progress-heading">
+        <div>
+          <p class="section-label">进度</p>
+          <h2 id="state-label">正在初始化</h2>
+        </div>
+        <span id="current-item" class="current-item"></span>
+      </div>
+      <progress id="progress" max="1" value="0">0%</progress>
+      <div id="error-message" class="error-message" role="alert" hidden></div>
+    </section>
+
+    <section class="options" aria-labelledby="options-title">
+      <div>
+        <p class="section-label">文件内容</p>
+        <h2 id="options-title">导出格式</h2>
+      </div>
+      <div class="option-controls">
+        <label><input id="format-markdown" type="checkbox" checked> Markdown</label>
+        <label><input id="format-html" type="checkbox" checked> 离线 HTML</label>
+        <label><input id="include-images" type="checkbox" checked> 本地图片</label>
+      </div>
+    </section>
+
+    <section class="activity" aria-labelledby="activity-title">
+      <div class="activity-heading">
+        <p class="section-label">最近结果</p>
+        <h2 id="activity-title">导出记录</h2>
+      </div>
+      <ol id="activity-log" class="activity-log" aria-live="polite">
+        <li class="log-item log-neutral">等待开始</li>
+      </ol>
+    </section>
+  </main>
+
+  <footer class="actionbar">
+    <button id="start-button" class="button primary" type="button" disabled>
+      <i data-lucide="download" aria-hidden="true"></i><span>开始导出</span>
+    </button>
+    <button id="stop-button" class="button danger" type="button" hidden>
+      <i data-lucide="square" aria-hidden="true"></i><span>停止</span>
+    </button>
+    <button id="retry-button" class="button secondary" type="button" hidden>
+      <i data-lucide="rotate-ccw" aria-hidden="true"></i><span>重试未完成</span>
+    </button>
+    <button id="save-again-button" class="button secondary" type="button" hidden>
+      <i data-lucide="file-archive" aria-hidden="true"></i><span>再次保存</span>
+    </button>
+  </footer>
+</body>
+</html>

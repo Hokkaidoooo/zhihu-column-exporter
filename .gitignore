@@ -1,0 +1,14 @@
+node_modules/
+dist/
+STATUS.md
+.env
+.env.*
+*.log
+.tmp-*/
+.tmp-*
+test-results/
+exports/
+*.zip
+*.crx
+*.pem
+*.key

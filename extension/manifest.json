@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "知乎付费专栏导出",
+  "version": "1.5.1",
+  "description": "将当前账号有权阅读的知乎付费专栏保存为本地 Markdown 和 HTML。",
+  "minimum_chrome_version": "120",
+  "permissions": [
+    "downloads",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://www.zhihu.com/*",
+    "https://zhuanlan.zhihu.com/*",
+    "https://*.zhimg.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "导出当前知乎付费专栏"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.zhihu.com/*",
+        "https://zhuanlan.zhihu.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

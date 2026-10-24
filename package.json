@@ -1,0 +1,30 @@
+{
+  "name": "zhihu-column-exporter",
+  "version": "1.5.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test",
+    "check": "npm run test && npm run lint && npm run build && npm run validate",
+    "lint": "node scripts/check-syntax.mjs",
+    "validate": "node scripts/validate.mjs",
+    "package": "node scripts/package.mjs"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "lucide": "^0.468.0",
+    "turndown": "^7.2.0",
+    "turndown-plugin-gfm": "^1.0.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.0.0"
+  },
+  "description": "将当前账号有权阅读的知乎专栏保存为本地 Markdown、HTML 与图片。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Hokkaidoooo/zhihu-column-exporter.git"
+  }
+}
