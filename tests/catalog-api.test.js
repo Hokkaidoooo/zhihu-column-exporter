@@ -14,6 +14,27 @@ function makeArticles(count) {
   }));
 }
 
+test("缺失总数不冒充零，显式末页仍可确认完整目录", async () => {
+  for (const total of [undefined, null, "", false]) {
+    const page = parseColumnArticlesPage({ data: makeArticles(1), paging: { totals: total } }, "c_123");
+    assert.equal(page.total, null);
+  }
+  const offsets = [];
+  const articles = makeArticles(2);
+  const result = await fetchAllColumnArticles({ columnId: "c_123", requestPage: async (_url, { offset }) => {
+    offsets.push(offset);
+    return { data: [articles[offset]], paging: { totals: null, is_end: offset === 1 } };
+  } });
+  assert.deepEqual(offsets, [0, 1]);
+  assert.equal(result.expectedCount, 2);
+  assert.equal(result.complete, true);
+});
+
+test("目录缺少文章数组或含失真身份时显式拒绝，不跳过后报告完整", () => {
+  assert.throws(() => parseColumnArticlesPage({ paging: { is_end: true } }, "c_123"), /文章数组/);
+  assert.throws(() => parseColumnArticlesPage({ data: [{ id: 1000000000000000123 }], paging: { is_end: true } }, "c_123"), /精确文章身份/);
+});
+
 function pagedRequest(articles, pageSize = 20, overlap = 0, columnId = "c_123") {
   return async (_url, { offset }) => {
     const start = Math.max(0, offset - (offset ? overlap : 0));

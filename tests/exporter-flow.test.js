@@ -12,7 +12,7 @@ import * as fflate from "fflate";
 const SOURCE_URL = "https://www.zhihu.com/market/paid_column/100";
 const IMAGE_URL = "https://pic1.zhimg.com/synthetic-export-test.png";
 const IMAGE_PLACEHOLDER = "__ZHIHU_EXPORT_IMAGE_TEST__";
-const PNG_BYTES = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+const PNG_BYTES = new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0xsAAAAASUVORK5CYII=", "base64"));
 const realSetTimeout = setTimeout;
 const realClearTimeout = clearTimeout;
 const htmlPromise = readFile(new URL("../static/export.html", import.meta.url), "utf8");
@@ -46,7 +46,7 @@ function articleFor(link, images) {
   };
 }
 
-async function createFixture(t, { count = 1, images = false, downloadError = null } = {}) {
+async function createFixture(t, { count = 1, images = false, downloadError = null, catalogComplete = true, api = false } = {}) {
   const errors = [];
   const console = new VirtualConsole();
   console.on("jsdomError", (error) => errors.push(error));
@@ -56,15 +56,23 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
     virtualConsole: console
   });
   const context = dom.getInternalVMContext();
+  const columnId = api ? "c_100" : "100";
+  const sourceUrl = api ? "https://www.zhihu.com/column/c_100" : SOURCE_URL;
   const links = Array.from({ length: count }, (_, index) => {
     const sectionId = String(201 + index);
-    return { sectionId, title: `合成章节 ${index + 1}`, url: `${SOURCE_URL}/section/${sectionId}` };
+    return { sectionId, title: `合成章节 ${index + 1}`, url: api ? `https://zhuanlan.zhihu.com/p/${sectionId}` : `${SOURCE_URL}/section/${sectionId}` };
   });
-  const tabs = new Map([[1, { id: 1, url: SOURCE_URL, title: "合成测试专栏 - 知乎", status: "complete" }]]);
+  const tabs = new Map([[1, { id: 1, url: sourceUrl, title: "合成测试专栏 - 知乎", status: "complete" }]]);
   const heldRequests = new Map();
   const timers = new Set();
   const blobs = new Map();
   const downloads = [];
+  const downloadListeners = new Set();
+  const downloadStates = new Map();
+  let finishDownloads = true;
+  let fetchHandler = null;
+  let apiHandler = null;
+  const apiCalls = [];
   const extractCalls = [];
   const fetchCalls = [];
   const createdBlobs = [];
@@ -79,16 +87,23 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
   }
   context.Date = FixtureDate;
   context.Blob = Blob;
+  context.AbortController = AbortController;
+  context.TextDecoder = TextDecoder;
+  // jsdom does not decode images; real-browser smoke covers browser decoding.
+  context.createImageBitmap = async (blob) => {
+    assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), PNG_BYTES);
+    return { close() {} };
+  };
   context.require = (name) => {
     assert.equal(name, "fflate", "Only the real ZIP library may be external");
     return fflate;
   };
   context.setTimeout = (callback, milliseconds = 0, ...args) => {
-    clock += milliseconds;
+    if (milliseconds < 20000) clock += milliseconds;
     const id = realSetTimeout(() => {
       timers.delete(id);
       callback(...args);
-    }, 0);
+    }, milliseconds >= 20000 ? milliseconds : 0);
     timers.add(id);
     return id;
   };
@@ -100,9 +115,10 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
     return id;
   };
   context.URL.revokeObjectURL = (id) => blobs.delete(id);
-  context.fetch = async (url) => {
-    assert.equal(url, IMAGE_URL, "Fixture forbids external requests");
+  context.fetch = async (url, options) => {
+    assert.ok(url.startsWith(IMAGE_URL), "Fixture forbids external requests");
     fetchCalls.push(url);
+    if (fetchHandler) return fetchHandler(url, options);
     return new Response(imageStatus === 200 ? PNG_BYTES : "synthetic unavailable", {
       status: imageStatus,
       headers: { "content-type": "image/png" }
@@ -115,11 +131,31 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
     return tab;
   }
 
+  function article(link) {
+    const result = articleFor(link, images);
+    if (api) {
+      result.columnId = columnId;
+      result.html += `<p>${"合成完整正文内容。".repeat(100)}</p>`;
+      result.markdown += "合成完整正文内容。".repeat(100);
+    }
+    return result;
+  }
+
+  function completeDownload(id, state = "complete", error) {
+    downloadStates.set(id, { id, state, error });
+    for (const listener of downloadListeners) listener({ id, state: { current: state }, ...(error ? { error: { current: error } } : {}) });
+  }
+
   async function sendMessage(id, message) {
     const tab = tabById(id);
-    if (message.type === "PING") return { ok: true };
+    if (message.type === "CANCEL_OPERATION") return { ok: true };
     if (message.type === "DISCOVER_COLUMN") {
-      return { ok: true, columnId: "100", columnTitle: "合成测试专栏", catalogComplete: true, expectedCount: links.length, links };
+      return { ok: true, columnId, columnTitle: "合成测试专栏", catalogComplete, expectedCount: catalogComplete ? links.length : null, articleApiAvailable: api, links };
+    }
+    if (message.type === "PROBE_ARTICLE_API") return { ok: true, anonymousDenied: true, apiOrigin: "https://www.zhihu.com", article: article(links[0]) };
+    if (message.type === "EXTRACT_API_ARTICLE") {
+      apiCalls.push(message.sectionId);
+      return apiHandler ? apiHandler(message.sectionId) : article(links.find((item) => item.sectionId === message.sectionId));
     }
     const sectionId = tab.url.split("/").at(-1);
     const link = links.find((item) => item.sectionId === sectionId);
@@ -133,8 +169,8 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
     assert.equal(message.type, "EXTRACT_ARTICLE", "Unexpected content-script request");
     extractCalls.push(sectionId);
     if (mode.failed.has(sectionId)) return { ok: false, sectionId, reason: "合成测试正文暂时不可用" };
-    if (mode.stopAfter === sectionId) dom.window.document.querySelector("#stop-button").click();
-    return articleFor(link, images);
+    if (mode.stopAfter === sectionId) context.setTimeout(() => dom.window.document.querySelector("#stop-button").click(), 0);
+    return article(link);
   }
 
   context.chrome = {
@@ -162,13 +198,18 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
       executeScript: async ({ target }) => { tabById(target.tabId); }
     },
     downloads: {
+      onChanged: { addListener(fn) { downloadListeners.add(fn); }, removeListener(fn) { downloadListeners.delete(fn); } },
+      search: async ({ id }) => [downloadStates.get(id)].filter(Boolean),
       download: async (options) => {
         const blob = blobs.get(options.url);
         assert.ok(blob, "Download must receive the real generated ZIP blob");
         const bytes = new Uint8Array(await blob.arrayBuffer());
         downloads.push({ ...options, files: fflate.unzipSync(bytes) });
         if (downloadError) throw new Error(downloadError);
-        return downloads.length;
+        const id = downloads.length;
+        downloadStates.set(id, { id, state: "in_progress" });
+        if (finishDownloads) completeDownload(id);
+        return id;
       }
     }
   };
@@ -184,7 +225,12 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
 
   const element = (id) => dom.window.document.querySelector(`#${id}`);
   return {
-    links, downloads, extractCalls, fetchCalls, createdBlobs, errors, element,
+    links, downloads, extractCalls, fetchCalls, createdBlobs, errors, element, apiCalls,
+    setFetch(fn) { fetchHandler = fn; },
+    setApi(fn) { apiHandler = fn; },
+    setAutoFinishDownloads(value) { finishDownloads = value; },
+    completeDownload,
+    downloadListenerCount() { return downloadListeners.size; },
     configure(next) { mode = { stopAfter: null, blocked: new Set(), failed: new Set(), ...next }; },
     setImageStatus(status) { imageStatus = status; },
     temporaryTabCount() { return tabs.size - 1; },
@@ -200,6 +246,19 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
 function archiveInfo(download) {
   return JSON.parse(fflate.strFromU8(download.files["export-info.json"]));
 }
+
+test("单篇接口失败明确转正常页面，其他接口成功文章无需重读", async (t) => {
+  const fixture = await createFixture(t, { count: 8, api: true });
+  fixture.setApi((sectionId) => {
+    if (sectionId === "204") return { ok: false, reason: "合成正文被截断" };
+    return { ...articleFor(fixture.links.find((link) => link.sectionId === sectionId), false), columnId: "c_100" };
+  });
+  await fixture.act("start-button");
+  assert.equal(archiveInfo(fixture.downloads[0]).complete, true);
+  assert.deepEqual(fixture.extractCalls, ["201", "204"]);
+  assert.match(fixture.element("activity-log").textContent, /合成正文被截断/);
+  assert.equal(fixture.temporaryTabCount(), 0);
+});
 
 test("停止后真实 ZIP 包含所有尚未尝试文章并允许重试", async (t) => {
   const fixture = await createFixture(t, { count: 6 });
@@ -303,4 +362,115 @@ test("全部文章成功时真实 ZIP 的目录顺序与完成标记一致", asy
   assert.ok(!download.files["未导出章节.txt"]);
   assert.equal(fixture.element("state-label").textContent, "全部导出完成");
   assert.equal(fixture.temporaryTabCount(), 0);
+});
+
+test("同一图片跨篇复用一个文件，再次整理复用成功缓存", async (t) => {
+  const f = await createFixture(t, { count: 3, images: true });
+  f.setImageStatus(200);
+  await f.act("start-button");
+  assert.equal(f.fetchCalls.length, 1);
+  assert.equal(Object.keys(f.downloads[0].files).filter((name) => name.startsWith("assets/")).length, 1);
+  for (const [name, bytes] of Object.entries(f.downloads[0].files)) {
+    if (name.startsWith("html/")) assert.match(fflate.strFromU8(bytes), /\.\.\/assets\/001\/01.png/);
+  }
+  await f.act("start-button");
+  assert.equal(f.fetchCalls.length, 1);
+});
+
+test("HTTP 200 的 HTML 错误页不能进入图片或完整结果", async (t) => {
+  const f = await createFixture(t, { images: true });
+  f.setFetch(async () => new Response("<html>登录页</html>", { headers: { "content-type": "text/html" } }));
+  await f.act("start-button");
+  const info = archiveInfo(f.downloads[0]);
+  assert.equal(info.complete, false);
+  assert.equal(info.imageFailureCount, 1);
+  assert.equal(f.fetchCalls.length, 1);
+  assert.equal(info.imageCount, 0);
+});
+
+test("目录总量未知只保存已发现文章，不能宣称全量完成", async (t) => {
+  const f = await createFixture(t, { count: 3, catalogComplete: null });
+  await f.act("start-button");
+  const info = archiveInfo(f.downloads[0]);
+  assert.equal(info.complete, false);
+  assert.equal(info.expectedArticleCount, null);
+  assert.match(fflate.strFromU8(f.downloads[0].files["README.md"]), /目录完整性尚未确认/);
+  assert.equal(f.element("state-label").textContent, "已保存部分结果");
+});
+
+test("图片阶段停止会中断请求并保存明确的部分结果", async (t) => {
+  const f = await createFixture(t, { count: 3, images: true });
+  let signal;
+  f.setFetch((_url, options) => { signal = options.signal; return new Promise(() => {}); });
+  const running = f.act("start-button");
+  await waitUntil(() => signal, "图片请求启动");
+  f.element("stop-button").click();
+  await running;
+  assert.equal(signal.aborted, true);
+  assert.equal(f.fetchCalls.length, 1);
+  const info = archiveInfo(f.downloads[0]);
+  assert.equal(info.complete, false);
+  assert.equal(info.articleCount, 3);
+  assert.equal(info.imageFailureCount, 3);
+});
+
+test("运行中固定格式选项，不产生指向不存在文件的目录", async (t) => {
+  const f = await createFixture(t, { count: 3, images: true });
+  f.element("format-markdown").checked = false;
+  let release;
+  f.setFetch(() => new Promise((resolve) => { release = () => resolve(new Response(PNG_BYTES, { headers: { "content-type": "image/png" } })); }));
+  const running = f.act("start-button");
+  await waitUntil(() => release, "图片等待");
+  assert.equal(f.element("format-html").disabled, true);
+  f.element("format-html").checked = false;
+  f.element("format-markdown").checked = true;
+  release();
+  await running;
+  const files = f.downloads[0].files;
+  assert.equal(Object.keys(files).filter((name) => name.startsWith("html/")).length, 3);
+  assert.equal(Object.keys(files).filter((name) => name.startsWith("articles/")).length, 0);
+  const readme = fflate.strFromU8(files["README.md"]);
+  for (const match of readme.matchAll(/\]\(([^)]+)\)/g)) assert.ok(files[decodeURIComponent(match[1])]);
+});
+
+test("下载启动后等待浏览器写入完成，中断时保留再次保存入口", async (t) => {
+  const f = await createFixture(t);
+  f.setAutoFinishDownloads(false);
+  const running = f.act("start-button");
+  await waitUntil(() => f.downloads.length === 1, "下载启动");
+  assert.equal(f.element("state-label").textContent, "正在保存文件");
+  assert.equal(f.element("start-button").disabled, true);
+  f.completeDownload(1, "interrupted", "FILE_NO_SPACE");
+  await running;
+  assert.match(f.element("error-message").textContent, /FILE_NO_SPACE/);
+  assert.equal(f.element("save-again-button").hidden, false);
+  assert.equal(f.downloadListenerCount(), 0);
+  f.setAutoFinishDownloads(true);
+  f.element("save-again-button").click();
+  await waitUntil(() => f.element("state-label").textContent === "压缩包已保存", "再次保存完成");
+  assert.equal(f.downloads.length, 2);
+  assert.equal(f.element("error-message").hidden, true);
+  assert.equal(f.downloadListenerCount(), 0);
+});
+
+test("API 校验文章复用，后续单篇任务连续调度且最多四路", async (t) => {
+  const f = await createFixture(t, { count: 9, api: true });
+  let active = 0;
+  let peak = 0;
+  let releaseSlow;
+  const slow = new Promise((resolve) => { releaseSlow = resolve; });
+  f.setApi(async (sectionId) => {
+    active++;
+    peak = Math.max(peak, active);
+    if (sectionId === "202") await slow;
+    if (sectionId === "209") releaseSlow();
+    active--;
+    return { ...articleFor(f.links.find((link) => link.sectionId === sectionId), false), columnId: "c_100" };
+  });
+  await f.act("start-button");
+  assert.equal(archiveInfo(f.downloads[0]).complete, true);
+  assert.deepEqual(f.extractCalls, ["201"]);
+  assert.ok(!f.apiCalls.includes("201"));
+  assert.equal(f.apiCalls.length, 8);
+  assert.ok(peak <= 4);
 });

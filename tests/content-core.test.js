@@ -182,3 +182,31 @@ test("廉价探针把权限占位视为未就绪，与完整提取判定一致",
   assert.equal(probeArticleDocument(document, pageUrl).ok, false);
   assert.equal(extractArticleDocument(document, pageUrl, (root) => root.textContent).accessDenied, true);
 });
+
+test("旧式 dataset 数字 ID 在 JSON 解析前保留精确值", () => {
+  const url = "https://www.zhihu.com/market/paid_column/100";
+  const dom = new JSDOM(`<div data-za-extra-module='{"card":{"content":{"id":1000000000000000123}}}'>合成章节</div>`, { url });
+  assert.equal(extractColumnLinks(dom.window.document, url, "100")[0].sectionId, "1000000000000000123");
+  dom.window.close();
+});
+
+test("正文与图片地址等长替换也会重置稳定指纹", () => {
+  const dom = new JSDOM(`<article class="RichText"><p>${"原始正文。".repeat(100)}</p><img src="https://pic1.zhimg.com/a.jpg"></article>`, { url: pageUrl });
+  const doc = dom.window.document;
+  const before = probeArticleDocument(doc, pageUrl).fingerprint;
+  doc.querySelector("img").src = "https://pic1.zhimg.com/b.jpg";
+  const afterImage = probeArticleDocument(doc, pageUrl).fingerprint;
+  assert.notEqual(afterImage, before);
+  doc.querySelector("p").textContent = "更新正文。".repeat(100);
+  assert.notEqual(probeArticleDocument(doc, pageUrl).fingerprint, afterImage);
+  dom.window.close();
+});
+
+test("离线正文的页内链接仍指向保留的目标 ID", () => {
+  const dom = new JSDOM(`<article class="RichText"><a href="#part">跳转</a><h2 id="part" onclick="bad()">章节</h2><p>${"合成正文。".repeat(100)}</p></article>`, { url: pageUrl });
+  const result = extractArticleDocument(dom.window.document, pageUrl, (root) => root.textContent);
+  assert.match(result.html, /id="part"/);
+  assert.match(result.html, /href="#part"/);
+  assert.doesNotMatch(result.html, /onclick/);
+  dom.window.close();
+});

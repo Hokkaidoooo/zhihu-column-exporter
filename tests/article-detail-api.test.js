@@ -104,7 +104,7 @@ test("401 和 403 直接归类为拒绝且不解析响应体", async () => {
   });
   assert.equal(result.ok, false);
   assert.equal(result.accessDenied, true);
-  assert.equal(result.retryable, undefined);
+  assert.equal(result.retryable, false);
   assert.equal(parsed, false);
 });
 

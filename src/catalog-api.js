@@ -6,6 +6,7 @@ const DEFAULT_MAX_PAGES = 2000;
 const API_ORIGINS = new Set(["https://www.zhihu.com", "https://zhuanlan.zhihu.com"]);
 
 function nonNegativeInteger(value) {
+  if (typeof value !== "number" && (typeof value !== "string" || !/^\d+$/.test(value))) return null;
   const number = Number(value);
   return Number.isSafeInteger(number) && number >= 0 ? number : null;
 }
@@ -66,6 +67,8 @@ function nextOffsetFromPaging(paging, columnId, apiOrigin, currentOffset) {
 export function parseColumnArticlesPage(payload, columnId, currentOffset = 0, apiOrigin = "https://www.zhihu.com") {
   const data = Array.isArray(payload?.data) ? payload.data : [];
   const links = data.map((item) => articleFromItem(item, columnId)).filter(Boolean);
+  if (!Array.isArray(payload?.data)) throw new Error("目录接口没有返回文章数组");
+  if (links.length !== data.length) throw new Error("目录中存在无法确认精确文章身份的记录");
   const paging = payload?.paging || {};
   const total = nonNegativeInteger(paging.totals);
   const next = nextOffsetFromPaging(paging, columnId, apiOrigin, currentOffset);

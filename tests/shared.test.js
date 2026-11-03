@@ -9,6 +9,15 @@ import {
   sanitizeFilename,
   uniqueBy
 } from "../src/shared.js";
+import { parseExactJsonNumbers } from "../src/shared.js";
+
+test("精确 JSON 数字解析保持字符串、转义和普通数值语义，并拒绝损坏 JSON", () => {
+  const input = '{"id":1000000000000000123,"text":"a\\\"1000000000000000123","count":3,"ratio":1.5,"exponent":1e2}';
+  assert.deepEqual(parseExactJsonNumbers(input), { id: "1000000000000000123", text: 'a"1000000000000000123', count: 3, ratio: 1.5, exponent: 100 });
+  for (const invalid of ['{"id":01000000000000000123}', '{"id":1000000000000000123x}', '{"id":1.}', '{1000000000000000123:1}']) {
+    assert.throws(() => parseExactJsonNumbers(invalid), SyntaxError);
+  }
+});
 
 test("识别旧版付费专栏章节链接", () => {
   assert.deepEqual(

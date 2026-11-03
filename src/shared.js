@@ -1,5 +1,22 @@
 const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
 
+export function exactNumericId(value) {
+  if (typeof value === "string" && /^\d+$/.test(value)) return value;
+  if (Number.isSafeInteger(value) && value >= 0) return String(value);
+  return null;
+}
+
+// Preserve integer tokens before JSON.parse can round them; quoted text is untouched.
+export function parseExactJsonNumbers(text) {
+  const tokens = /"(?:\\.|[^"\\])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+  return JSON.parse(text.replace(tokens, (token, offset) => {
+    if (!/^\d+$/.test(token) || Number.isSafeInteger(Number(token))) return token;
+    // Do not turn an invalid unquoted numeric object key into valid JSON.
+    if (/^\s*:/.test(text.slice(offset + token.length))) return token;
+    return `"${token}"`;
+  }));
+}
+
 export function isZhihuUrl(input) {
   try {
     return /(^|\.)zhihu\.com$/i.test(new URL(input).hostname);

@@ -1,4 +1,4 @@
-import { canonicalSectionUrl, parsePaidColumnUrl } from "./shared.js";
+import { canonicalSectionUrl, parsePaidColumnUrl, exactNumericId } from "./shared.js";
 
 export function sourceFromArticleItem(item) {
   return item?.target || item?.article || item;
@@ -14,8 +14,8 @@ export function sectionIdFromArticleItem(item) {
 
   const candidateIds = [source?.id, item?.id];
   for (const candidate of candidateIds) {
-    if (typeof candidate === "string" && /^\d+$/.test(candidate)) return candidate;
-    if (Number.isSafeInteger(candidate) && candidate >= 0) return String(candidate);
+    const exact = exactNumericId(candidate);
+    if (exact !== null) return exact;
   }
   return null;
 }
