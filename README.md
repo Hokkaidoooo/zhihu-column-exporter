@@ -4,16 +4,20 @@
 
 将当前浏览器账号已经有权阅读的知乎专栏保存到本地。导出包包含 Markdown、离线 HTML、阅读目录和正文图片，适合个人学习、检索与备份。
 
+> **当前推荐安装 [v1.5.1](https://github.com/Hokkaidoooo/zhihu-column-exporter/releases/tag/v1.5.1)。**
+> v1.6.1 存在已知问题：正文接口返回 HTTP 403 时，即使文章网页仍可正常阅读，也可能在导出任何章节之前停止，并出现误导的“结果保存失败”提示。修正版尚未发布，请使用 v1.5.1 发布包，不要直接加载 main 中的 `extension`。
+> 下方使用步骤适用于推荐版本；新增性能与恢复功能描述对应 main，暂不作为升级建议。旧版也不保证免于平台访问限制。
+
 ## 安装
 
 需要 Chrome 120 或更新版本，也可在支持 Manifest V3 的 Chromium 浏览器中加载。
 
-1. 从 [最新发布](https://github.com/Hokkaidoooo/zhihu-column-exporter/releases/latest) 下载并解压安装包。
+1. 从 [推荐版本 v1.5.1](https://github.com/Hokkaidoooo/zhihu-column-exporter/releases/tag/v1.5.1) 下载并解压 `zhihu-column-exporter-v1.5.1.zip`。
 2. 打开 `chrome://extensions/`，开启“开发者模式”。Windows 用户也可双击包内的 `install-extension.cmd` 打开扩展页和文件夹。
 3. 点击“加载已解压的扩展程序”，选择包内的 `extension` 文件夹。
 4. 将“知乎付费专栏导出”固定到浏览器工具栏。
 
-更新时，替换扩展文件夹，在扩展页点击“重新加载”，刷新知乎来源页面，再关闭旧导出页并重新打开。仓库中的 `extension` 文件夹也可直接加载，包含尚未打包发布的最新提交。
+切换版本时，使用对应发布包的扩展文件夹，在扩展页点击“重新加载”，刷新知乎来源页面，再关闭旧导出页并重新打开。
 
 更新前先停止当前导出并保存结果。正在运行的导出页不会自动获得新版逻辑，重新加载扩展也不能迁移旧页面中尚未保存的正文。
 
