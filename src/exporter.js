@@ -38,6 +38,7 @@ import {
 } from "./export-plan.js";
 import { assertExpectedArticleResult, expectedPageFromUrl, pageMatchesExpectation } from "./page-identity.js";
 import { ensureExpectedTabPage, waitForExpectedTabUrl, waitForStableTab } from "./tab-lifecycle.js";
+import { createPageWorker, isMissingTabError, PageTabRecoveryError } from "./page-worker.js";
 
 const PAGE_READY_ATTEMPTS = 200;
 const PAGE_READY_INTERVAL_MS = 100;
@@ -78,12 +79,15 @@ let session = freshSession();
 
 async function closeTempTab(tabId) {
   if (!Number.isInteger(tabId)) return;
-  activeTempTabIds.delete(tabId);
   try {
     await chrome.tabs.remove(tabId);
-  } catch {
-    // The tab may already be closed by cancellation or by the browser.
+  } catch (error) {
+    if (!isMissingTabError(error, tabId)) {
+      addLog(`读取标签页关闭失败：${error.message || error}`, "error");
+      throw error;
+    }
   }
+  activeTempTabIds.delete(tabId);
 }
 
 function freshSession() {
@@ -190,7 +194,8 @@ async function waitForTabStable(tabId, timeoutMs = 45000, stableMs = 300) {
 async function ensureContentScript(tabId) {
   try {
     await chrome.tabs.sendMessage(tabId, { type: "PING" });
-  } catch {
+  } catch (error) {
+    if (isMissingTabError(error, tabId)) throw error;
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
     await sleep(250);
   }
@@ -385,7 +390,7 @@ async function extractOneArticle(tabId, link) {
     return result;
   }, {
     attempts: 3,
-    shouldRetry: () => !session.cancelled,
+    shouldRetry: (error) => !session.cancelled && !isMissingTabError(error, tabId),
     onRetry: ({ error, nextAttempt }) => {
       addLog(`${link.title}：${error.message}，正在自动重试 ${nextAttempt} / 3`, "neutral");
     }
@@ -408,12 +413,13 @@ async function processPageQueue(queue, includeDiscovered = true) {
   addLog(pageModeAnnouncement(initial.length), "neutral");
 
   const takeNext = () => {
+    if (session.cancelled || stopReason) return null;
     const next = pending()[0];
     if (next) claimedIds.add(next.sectionId);
     return next;
   };
 
-  const runWorker = async (tabId) => {
+  const runWorker = async (worker) => {
     for (let link = takeNext(); link; link = takeNext()) {
       if (session.cancelled || stopReason) return;
 
@@ -423,7 +429,7 @@ async function processPageQueue(queue, includeDiscovered = true) {
       setState("正在逐篇提取正文", `${position} / ${total} · ${link.title}${eta ? ` · ${eta}` : ""}`);
 
       try {
-        const article = await extractOneArticle(tabId, link);
+        const article = await worker.run((tabId) => extractOneArticle(tabId, link));
         if (!article?.ok) {
           recordFailure(link, article?.reason || "正文提取失败", Boolean(article?.accessDenied));
           consecutiveFailures += 1;
@@ -438,6 +444,11 @@ async function processPageQueue(queue, includeDiscovered = true) {
         }
       } catch (error) {
         if (session.cancelled) return;
+        if (error instanceof PageTabRecoveryError) {
+          recordFailure(link, error.message);
+          stopReason = error;
+          return;
+        }
         if (/当前 Chrome 会话没有显示完整正文/.test(error.message || "")) {
           stopReason = error;
           return;
@@ -454,16 +465,27 @@ async function processPageQueue(queue, includeDiscovered = true) {
     }
   };
 
-  const tabs = [];
-  try {
-    for (let index = 0; index < tabCount; index += 1) {
+  const workers = [];
+  const tabs = {
+    async create() {
       const tab = await chrome.tabs.create({ url: "about:blank", active: false });
       activeTempTabIds.add(tab.id);
-      tabs.push(tab.id);
+      return tab.id;
+    },
+    close: closeTempTab,
+    forget: (tabId) => activeTempTabIds.delete(tabId)
+  };
+  try {
+    for (let index = 0; index < tabCount; index += 1) {
+      workers.push(await createPageWorker({
+        tabs,
+        isStopped: () => session.cancelled || Boolean(stopReason),
+        onRecovery: ({ attempt, limit }) => addLog(`读取标签页已失效，已在原并发名额内重建并继续当前文章（${attempt} / ${limit}）`, "neutral")
+      }));
     }
-    await Promise.all(tabs.map((tabId) => runWorker(tabId)));
+    await Promise.all(workers.map(runWorker));
   } finally {
-    await Promise.all(tabs.map((tabId) => closeTempTab(tabId)));
+    await Promise.all(workers.map((worker) => worker.close()));
   }
   if (stopReason) throw stopReason;
 }
@@ -926,7 +948,9 @@ async function stopExport() {
 }
 
 ui.start.addEventListener("click", startExport);
-ui.stop.addEventListener("click", stopExport);
+ui.stop.addEventListener("click", () => {
+  stopExport().catch((error) => setError(`停止时关闭读取页失败：${error.message || error}`));
+});
 ui.retry.addEventListener("click", startExport);
 ui.saveAgain.addEventListener("click", () => {
   saveArchive().catch((error) => setError(`保存失败：${error.message || error}`));

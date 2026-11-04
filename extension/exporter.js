@@ -1722,6 +1722,62 @@
     return tab;
   }
 
+  // src/page-worker.js
+  var PAGE_TAB_RECOVERY_LIMIT = 2;
+  var PageTabRecoveryError = class extends Error {
+  };
+  function isMissingTabError(error, tabId) {
+    const match = /^No tab with id:\s*(\d+)\.?$/.exec(String(error?.message || error).trim());
+    return Boolean(match) && Number(match[1]) === tabId;
+  }
+  async function createPageWorker({ tabs, isStopped, onRecovery, recoveryLimit = PAGE_TAB_RECOVERY_LIMIT }) {
+    if (!Number.isInteger(recoveryLimit) || recoveryLimit < 0) throw new TypeError("recoveryLimit \u5FC5\u987B\u662F\u975E\u8D1F\u6574\u6570");
+    let tabId = null;
+    let recoveries = 0;
+    async function close() {
+      if (tabId === null) return;
+      const closingId = tabId;
+      await tabs.close(closingId);
+      if (tabId === closingId) tabId = null;
+    }
+    async function open() {
+      if (isStopped()) throw new Error("\u5BFC\u51FA\u5DF2\u505C\u6B62");
+      tabId = await tabs.create();
+      if (!isStopped()) return;
+      await close();
+      throw new Error("\u5BFC\u51FA\u5DF2\u505C\u6B62");
+    }
+    async function recover(error) {
+      const previousId = tabId;
+      tabId = null;
+      tabs.forget(previousId);
+      if (recoveries >= recoveryLimit) {
+        throw new PageTabRecoveryError(`\u8BFB\u53D6\u6807\u7B7E\u9875\u5DF2\u5931\u6548\uFF0C\u8FBE\u5230\u672C\u8F6E\u6062\u590D\u4E0A\u9650\uFF08\u6BCF\u8DEF ${recoveryLimit} \u6B21\uFF09\uFF0C\u5DF2\u505C\u6B62\u8BFB\u53D6\uFF1B\u53EF\u4FDD\u5B58\u7ED3\u679C\u540E\u91CD\u8BD5\u672A\u5B8C\u6210`, { cause: error });
+      }
+      recoveries += 1;
+      try {
+        await open();
+      } catch (createError) {
+        if (isStopped()) throw createError;
+        throw new PageTabRecoveryError(`\u65E0\u6CD5\u91CD\u5EFA\u8BFB\u53D6\u6807\u7B7E\u9875\uFF0C\u5DF2\u505C\u6B62\u8BFB\u53D6\uFF1A${createError.message || createError}`, { cause: createError });
+      }
+      onRecovery({ previousId, tabId, attempt: recoveries, limit: recoveryLimit });
+    }
+    async function run(operation) {
+      while (!isStopped()) {
+        try {
+          return await operation(tabId);
+        } catch (error) {
+          if (isStopped() || !isMissingTabError(error, tabId)) throw error;
+          await recover(error);
+        }
+      }
+      throw new Error("\u5BFC\u51FA\u5DF2\u505C\u6B62");
+    }
+    await open();
+    return { run, close };
+  }
+
   // src/exporter.js
   var PAGE_READY_ATTEMPTS = 200;
   var PAGE_READY_INTERVAL_MS = 100;
@@ -1758,11 +1814,15 @@
   var session = freshSession();
   async function closeTempTab(tabId) {
     if (!Number.isInteger(tabId)) return;
-    activeTempTabIds.delete(tabId);
     try {
       await chrome.tabs.remove(tabId);
-    } catch {
+    } catch (error) {
+      if (!isMissingTabError(error, tabId)) {
+        addLog(`\u8BFB\u53D6\u6807\u7B7E\u9875\u5173\u95ED\u5931\u8D25\uFF1A${error.message || error}`, "error");
+        throw error;
+      }
     }
+    activeTempTabIds.delete(tabId);
   }
   function freshSession() {
     return {
@@ -1856,7 +1916,8 @@
   async function ensureContentScript(tabId) {
     try {
       await chrome.tabs.sendMessage(tabId, { type: "PING" });
-    } catch {
+    } catch (error) {
+      if (isMissingTabError(error, tabId)) throw error;
       await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
       await sleep(250);
     }
@@ -2029,7 +2090,7 @@
       return result;
     }, {
       attempts: 3,
-      shouldRetry: () => !session.cancelled,
+      shouldRetry: (error) => !session.cancelled && !isMissingTabError(error, tabId),
       onRetry: ({ error, nextAttempt }) => {
         addLog(`${link.title}\uFF1A${error.message}\uFF0C\u6B63\u5728\u81EA\u52A8\u91CD\u8BD5 ${nextAttempt} / 3`, "neutral");
       }
@@ -2048,11 +2109,12 @@
     const tabCount = pageModeTabCount(initial.length);
     addLog(pageModeAnnouncement(initial.length), "neutral");
     const takeNext = () => {
+      if (session.cancelled || stopReason) return null;
       const next = pending()[0];
       if (next) claimedIds.add(next.sectionId);
       return next;
     };
-    const runWorker = async (tabId) => {
+    const runWorker = async (worker) => {
       for (let link = takeNext(); link; link = takeNext()) {
         if (session.cancelled || stopReason) return;
         const position = session.completedIds.size + 1;
@@ -2060,7 +2122,7 @@
         const eta = remainingTimeText(Date.now() - startedAt, processed, scope().length);
         setState("\u6B63\u5728\u9010\u7BC7\u63D0\u53D6\u6B63\u6587", `${position} / ${total} \xB7 ${link.title}${eta ? ` \xB7 ${eta}` : ""}`);
         try {
-          const article = await extractOneArticle(tabId, link);
+          const article = await worker.run((tabId) => extractOneArticle(tabId, link));
           if (!article?.ok) {
             recordFailure(link, article?.reason || "\u6B63\u6587\u63D0\u53D6\u5931\u8D25", Boolean(article?.accessDenied));
             consecutiveFailures += 1;
@@ -2075,6 +2137,11 @@
           }
         } catch (error) {
           if (session.cancelled) return;
+          if (error instanceof PageTabRecoveryError) {
+            recordFailure(link, error.message);
+            stopReason = error;
+            return;
+          }
           if (/当前 Chrome 会话没有显示完整正文/.test(error.message || "")) {
             stopReason = error;
             return;
@@ -2090,16 +2157,27 @@
         }
       }
     };
-    const tabs = [];
-    try {
-      for (let index = 0; index < tabCount; index += 1) {
+    const workers = [];
+    const tabs = {
+      async create() {
         const tab = await chrome.tabs.create({ url: "about:blank", active: false });
         activeTempTabIds.add(tab.id);
-        tabs.push(tab.id);
+        return tab.id;
+      },
+      close: closeTempTab,
+      forget: (tabId) => activeTempTabIds.delete(tabId)
+    };
+    try {
+      for (let index = 0; index < tabCount; index += 1) {
+        workers.push(await createPageWorker({
+          tabs,
+          isStopped: () => session.cancelled || Boolean(stopReason),
+          onRecovery: ({ attempt, limit }) => addLog(`\u8BFB\u53D6\u6807\u7B7E\u9875\u5DF2\u5931\u6548\uFF0C\u5DF2\u5728\u539F\u5E76\u53D1\u540D\u989D\u5185\u91CD\u5EFA\u5E76\u7EE7\u7EED\u5F53\u524D\u6587\u7AE0\uFF08${attempt} / ${limit}\uFF09`, "neutral")
+        }));
       }
-      await Promise.all(tabs.map((tabId) => runWorker(tabId)));
+      await Promise.all(workers.map(runWorker));
     } finally {
-      await Promise.all(tabs.map((tabId) => closeTempTab(tabId)));
+      await Promise.all(workers.map((worker) => worker.close()));
     }
     if (stopReason) throw stopReason;
   }
@@ -2524,7 +2602,9 @@ ${item.url}
     await Promise.all([...activeTempTabIds].map((tabId) => closeTempTab(tabId)));
   }
   ui.start.addEventListener("click", startExport);
-  ui.stop.addEventListener("click", stopExport);
+  ui.stop.addEventListener("click", () => {
+    stopExport().catch((error) => setError(`\u505C\u6B62\u65F6\u5173\u95ED\u8BFB\u53D6\u9875\u5931\u8D25\uFF1A${error.message || error}`));
+  });
   ui.retry.addEventListener("click", startExport);
   ui.saveAgain.addEventListener("click", () => {
     saveArchive().catch((error) => setError(`\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message || error}`));
