@@ -4,19 +4,13 @@ export async function mapWithConcurrency(items, concurrency, operation) {
 
   const results = new Array(items.length);
   let cursor = 0;
-  let failure = null;
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (cursor < items.length && !failure) {
+    while (cursor < items.length) {
       const index = cursor;
       cursor += 1;
-      try {
-        results[index] = await operation(items[index], index);
-      } catch (error) {
-        failure = error;
-      }
+      results[index] = await operation(items[index], index);
     }
   });
   await Promise.all(workers);
-  if (failure) throw failure;
   return results;
 }

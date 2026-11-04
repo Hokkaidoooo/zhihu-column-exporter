@@ -1,5 +1,23 @@
 (() => {
   // node_modules/fflate/esm/browser.js
+  var ch2 = {};
+  var wk = (function(c, id, msg, transfer, cb) {
+    var w = new Worker(ch2[id] || (ch2[id] = URL.createObjectURL(new Blob([
+      c + ';addEventListener("error",function(e){e=e.error;postMessage({$e$:[e.message,e.code,e.stack]})})'
+    ], { type: "text/javascript" }))));
+    w.onmessage = function(e) {
+      var d = e.data, ed = d.$e$;
+      if (ed) {
+        var err2 = new Error(ed[0]);
+        err2["code"] = ed[1];
+        err2.stack = ed[2];
+        cb(err2, null);
+      } else
+        cb(null, d);
+    };
+    w.postMessage(msg, transfer);
+    return w;
+  });
   var u8 = Uint8Array;
   var u16 = Uint16Array;
   var i32 = Int32Array;
@@ -543,78 +561,98 @@
       o[k] = b[k];
     return o;
   };
+  var wcln = function(fn, fnStr, td2) {
+    var dt = fn();
+    var st = fn.toString();
+    var ks = st.slice(st.indexOf("[") + 1, st.lastIndexOf("]")).replace(/\s+/g, "").split(",");
+    for (var i = 0; i < dt.length; ++i) {
+      var v = dt[i], k = ks[i];
+      if (typeof v == "function") {
+        fnStr += ";" + k + "=";
+        var st_1 = v.toString();
+        if (v.prototype) {
+          if (st_1.indexOf("[native code]") != -1) {
+            var spInd = st_1.indexOf(" ", 8) + 1;
+            fnStr += st_1.slice(spInd, st_1.indexOf("(", spInd));
+          } else {
+            fnStr += st_1;
+            for (var t in v.prototype)
+              fnStr += ";" + k + ".prototype." + t + "=" + v.prototype[t].toString();
+          }
+        } else
+          fnStr += st_1;
+      } else
+        td2[k] = v;
+    }
+    return fnStr;
+  };
+  var ch = [];
+  var cbfs = function(v) {
+    var tl = [];
+    for (var k in v) {
+      if (v[k].buffer) {
+        tl.push((v[k] = new v[k].constructor(v[k])).buffer);
+      }
+    }
+    return tl;
+  };
+  var wrkr = function(fns, init, id, cb) {
+    if (!ch[id]) {
+      var fnStr = "", td_1 = {}, m = fns.length - 1;
+      for (var i = 0; i < m; ++i)
+        fnStr = wcln(fns[i], fnStr, td_1);
+      ch[id] = { c: wcln(fns[m], fnStr, td_1), e: td_1 };
+    }
+    var td2 = mrg({}, ch[id].e);
+    return wk(ch[id].c + ";onmessage=function(e){for(var k in e.data)self[k]=e.data[k];onmessage=" + init.toString() + "}", id, td2, cbfs(td2), cb);
+  };
+  var bDflt = function() {
+    return [u8, u16, i32, fleb, fdeb, clim, revfl, revfd, flm, flt, fdm, fdt, rev, deo, et, hMap, wbits, wbits16, hTree, ln, lc, clen, wfblk, wblk, shft, slc, dflt, dopt, deflateSync, pbf];
+  };
+  var pbf = function(msg) {
+    return postMessage(msg, [msg.buffer]);
+  };
+  var cbify = function(dat, opts, fns, init, id, cb) {
+    var w = wrkr(fns, init, id, function(err2, dat2) {
+      w.terminate();
+      cb(err2, dat2);
+    });
+    w.postMessage([dat, opts], opts.consume ? [dat.buffer] : []);
+    return function() {
+      w.terminate();
+    };
+  };
   var wbytes = function(d, b, v) {
     for (; v; ++b)
       d[b] = v, v >>>= 8;
   };
-  var Deflate = /* @__PURE__ */ (function() {
-    function Deflate2(opts, cb) {
-      if (typeof opts == "function")
-        cb = opts, opts = {};
-      this.ondata = cb;
-      this.o = opts || {};
-      this.s = { l: 0, i: 32768, w: 32768, z: 32768 };
-      this.b = new u8(98304);
-      if (this.o.dictionary) {
-        var dict = this.o.dictionary.subarray(-32768);
-        this.b.set(dict, 32768 - dict.length);
-        this.s.i = 32768 - dict.length;
+  function deflate(data, opts, cb) {
+    if (!cb)
+      cb = opts, opts = {};
+    if (typeof cb != "function")
+      err(7);
+    return cbify(data, opts, [
+      bDflt
+    ], function(ev) {
+      return pbf(deflateSync(ev.data[0], ev.data[1]));
+    }, 0, cb);
+  }
+  function deflateSync(data, opts) {
+    return dopt(data, opts || {}, 0, 0);
+  }
+  var fltn = function(d, p, t, o) {
+    for (var k in d) {
+      var val = d[k], n = p + k, op = o;
+      if (Array.isArray(val))
+        op = mrg(o, val[1]), val = val[0];
+      if (ArrayBuffer.isView(val))
+        t[n] = [val, op];
+      else {
+        t[n += "/"] = [new u8(0), op];
+        fltn(val, n, t, o);
       }
     }
-    Deflate2.prototype.p = function(c, f) {
-      this.ondata(dopt(c, this.o, 0, 0, this.s), f);
-    };
-    Deflate2.prototype.push = function(chunk, final) {
-      if (!this.ondata)
-        err(5);
-      if (this.s.l)
-        err(4);
-      var endLen = chunk.length + this.s.z;
-      if (endLen > this.b.length) {
-        if (endLen > 2 * this.b.length - 32768) {
-          var newBuf = new u8(endLen & -32768);
-          newBuf.set(this.b.subarray(0, this.s.z));
-          this.b = newBuf;
-        }
-        var split = this.b.length - this.s.z;
-        this.b.set(chunk.subarray(0, split), this.s.z);
-        this.s.z = this.b.length;
-        this.p(this.b, false);
-        this.b.set(this.b.subarray(-32768));
-        this.b.set(chunk.subarray(split), 32768);
-        this.s.z = chunk.length - split + 32768;
-        this.s.i = 32766, this.s.w = 32768;
-      } else {
-        this.b.set(chunk, this.s.z);
-        this.s.z += chunk.length;
-      }
-      this.s.l = final & 1;
-      if (this.s.z > this.s.w + 8191 || final) {
-        this.p(this.b, final || false);
-        this.s.w = this.s.i, this.s.i -= 2;
-      }
-      if (final) {
-        this.s = this.o = {};
-        this.b = et;
-      }
-    };
-    Deflate2.prototype.flush = function(sync) {
-      if (!this.ondata)
-        err(5);
-      if (this.s.l)
-        err(4);
-      this.p(this.b, false);
-      this.s.w = this.s.i, this.s.i -= 2;
-      if (sync) {
-        var c = new u8(6);
-        c[0] = this.s.r >> 3;
-        var ep = wfblk(c, this.s.r, et);
-        this.s.r = 0;
-        this.ondata(c.subarray(0, ep >> 3), false);
-      }
-    };
-    return Deflate2;
-  })();
+  };
   var te = typeof TextEncoder != "undefined" && /* @__PURE__ */ new TextEncoder();
   var td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder();
   var tds = 0;
@@ -656,9 +694,6 @@
     }
     return slc(ar, 0, ai);
   }
-  var dbf = function(l) {
-    return l == 1 ? 3 : l < 6 ? 2 : l == 9 ? 1 : 0;
-  };
   var exfl = function(ex) {
     var le = 0;
     if (ex) {
@@ -717,624 +752,101 @@
     wbytes(o, b + 12, d);
     wbytes(o, b + 16, e);
   };
-  var ZipPassThrough = /* @__PURE__ */ (function() {
-    function ZipPassThrough2(filename) {
-      this.filename = filename;
-      this.c = crc();
-      this.size = 0;
-      this.compression = 0;
-    }
-    ZipPassThrough2.prototype.process = function(chunk, final) {
-      this.ondata(null, chunk, final);
+  function zip(data, opts, cb) {
+    if (!cb)
+      cb = opts, opts = {};
+    if (typeof cb != "function")
+      err(7);
+    var r = {};
+    fltn(data, "", r, opts);
+    var k = Object.keys(r);
+    var lft = k.length, o = 0, tot = 0;
+    var slft = lft, files = new Array(lft);
+    var term = [];
+    var tAll = function() {
+      for (var i2 = 0; i2 < term.length; ++i2)
+        term[i2]();
     };
-    ZipPassThrough2.prototype.push = function(chunk, final) {
-      if (!this.ondata)
-        err(5);
-      this.c.p(chunk);
-      this.size += chunk.length;
-      if (final)
-        this.crc = this.c.d();
-      this.process(chunk, final || false);
-    };
-    return ZipPassThrough2;
-  })();
-  var ZipDeflate = /* @__PURE__ */ (function() {
-    function ZipDeflate2(filename, opts) {
-      var _this = this;
-      if (!opts)
-        opts = {};
-      ZipPassThrough.call(this, filename);
-      this.d = new Deflate(opts, function(dat, final) {
-        _this.ondata(null, dat, final);
+    var cbd = function(a, b) {
+      mt(function() {
+        cb(a, b);
       });
-      this.compression = 8;
-      this.flag = dbf(opts.level);
-    }
-    ZipDeflate2.prototype.process = function(chunk, final) {
-      try {
-        this.d.push(chunk, final);
-      } catch (e) {
-        this.ondata(e, null, final);
-      }
     };
-    ZipDeflate2.prototype.push = function(chunk, final) {
-      ZipPassThrough.prototype.push.call(this, chunk, final);
-    };
-    return ZipDeflate2;
-  })();
-  var Zip = /* @__PURE__ */ (function() {
-    function Zip2(cb) {
-      this.ondata = cb;
-      this.u = [];
-      this.d = 1;
-    }
-    Zip2.prototype.add = function(file) {
-      var _this = this;
-      if (!this.ondata)
-        err(5);
-      if (this.d & 2)
-        this.ondata(err(4 + (this.d & 1) * 8, 0, 1), null, false);
-      else {
-        var f = strToU8(file.filename), fl_1 = f.length;
-        var com = file.comment, o = com && strToU8(com);
-        var u = fl_1 != file.filename.length || o && com.length != o.length;
-        var hl_1 = fl_1 + exfl(file.extra) + 30;
-        if (fl_1 > 65535)
-          this.ondata(err(11, 0, 1), null, false);
-        var header = new u8(hl_1);
-        wzh(header, 0, file, f, u, -1);
-        var chks_1 = [header];
-        var pAll_1 = function() {
-          for (var _i = 0, chks_2 = chks_1; _i < chks_2.length; _i++) {
-            var chk = chks_2[_i];
-            _this.ondata(null, chk, false);
-          }
-          chks_1 = [];
-        };
-        var tr_1 = this.d;
-        this.d = 0;
-        var ind_1 = this.u.length;
-        var uf_1 = mrg(file, {
-          f,
-          u,
-          o,
-          t: function() {
-            if (file.terminate)
-              file.terminate();
-          },
-          r: function() {
-            pAll_1();
-            if (tr_1) {
-              var nxt = _this.u[ind_1 + 1];
-              if (nxt)
-                nxt.r();
-              else
-                _this.d = 1;
-            }
-            tr_1 = 1;
-          }
-        });
-        var cl_1 = 0;
-        file.ondata = function(err2, dat, final) {
-          if (err2) {
-            _this.ondata(err2, dat, final);
-            _this.terminate();
-          } else {
-            cl_1 += dat.length;
-            chks_1.push(dat);
-            if (final) {
-              var dd = new u8(16);
-              wbytes(dd, 0, 134695760);
-              wbytes(dd, 4, file.crc);
-              wbytes(dd, 8, cl_1);
-              wbytes(dd, 12, file.size);
-              chks_1.push(dd);
-              uf_1.c = cl_1, uf_1.b = hl_1 + cl_1 + 16, uf_1.crc = file.crc, uf_1.size = file.size;
-              if (tr_1)
-                uf_1.r();
-              tr_1 = 1;
-            } else if (tr_1)
-              pAll_1();
-          }
-        };
-        this.u.push(uf_1);
-      }
-    };
-    Zip2.prototype.end = function() {
-      var _this = this;
-      if (this.d & 2) {
-        this.ondata(err(4 + (this.d & 1) * 8, 0, 1), null, true);
-        return;
-      }
-      if (this.d)
-        this.e();
-      else
-        this.u.push({
-          r: function() {
-            if (!(_this.d & 1))
-              return;
-            _this.u.splice(-1, 1);
-            _this.e();
-          },
-          t: function() {
-          }
-        });
-      this.d = 3;
-    };
-    Zip2.prototype.e = function() {
-      var bt = 0, l = 0, tl = 0;
-      for (var _i = 0, _a2 = this.u; _i < _a2.length; _i++) {
-        var f = _a2[_i];
-        tl += 46 + f.f.length + exfl(f.extra) + (f.o ? f.o.length : 0);
-      }
-      var out = new u8(tl + 22);
-      for (var _b2 = 0, _c = this.u; _b2 < _c.length; _b2++) {
-        var f = _c[_b2];
-        wzh(out, bt, f, f.f, f.u, -f.c - 2, l, f.o);
-        bt += 46 + f.f.length + exfl(f.extra) + (f.o ? f.o.length : 0), l += f.b;
-      }
-      wzf(out, bt, this.u.length, tl, l);
-      this.ondata(null, out, true);
-      this.d = 2;
-    };
-    Zip2.prototype.terminate = function() {
-      for (var _i = 0, _a2 = this.u; _i < _a2.length; _i++) {
-        var f = _a2[_i];
-        f.t();
-      }
-      this.d = 2;
-    };
-    return Zip2;
-  })();
-
-  // src/cancellation.js
-  function abortError(message = "\u7528\u6237\u505C\u6B62\u5BFC\u51FA") {
-    const error = new Error(message);
-    error.name = "AbortError";
-    return error;
-  }
-  function throwIfAborted(signal) {
-    if (signal?.aborted) throw signal.reason || abortError();
-  }
-  function abortable(operation, signal) {
-    if (!signal) return operation;
-    return new Promise((resolve, reject) => {
-      const onAbort = () => {
-        signal.removeEventListener("abort", onAbort);
-        reject(signal.reason || abortError());
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      Promise.resolve(operation).then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
-      if (signal.aborted) onAbort();
+    mt(function() {
+      cbd = cb;
     });
-  }
-  function delay(milliseconds, signal) {
-    throwIfAborted(signal);
-    return new Promise((resolve, reject) => {
-      const finish = () => {
-        signal?.removeEventListener("abort", onAbort);
-        resolve();
-      };
-      const timer = setTimeout(finish, milliseconds);
-      const onAbort = () => {
-        clearTimeout(timer);
-        signal.removeEventListener("abort", onAbort);
-        reject(signal.reason || abortError());
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-    });
-  }
-
-  // src/archive.js
-  var CHUNK_BYTES = 64 * 1024;
-  function createArchive({ yieldControl = () => delay(0) } = {}) {
-    const parts = [];
-    const paths = /* @__PURE__ */ new Set();
-    let failure = null;
-    let finished = false;
-    let tail = Promise.resolve();
-    const archive = new Zip((error, bytes, final) => {
-      if (error) {
-        failure = error;
-        return;
-      }
-      if (bytes.length) parts.push(bytes);
-      if (final) finished = true;
-    });
-    const append = async (path, input, compress) => {
-      if (failure) throw failure;
-      if (finished) throw new Error("\u538B\u7F29\u5305\u5DF2\u7ECF\u7ED3\u675F");
-      if (paths.has(path)) throw new Error(`\u538B\u7F29\u5305\u8DEF\u5F84\u91CD\u590D\uFF1A${path}`);
-      paths.add(path);
-      const bytes = typeof input === "string" ? strToU8(input) : input;
-      const entry = compress ? new ZipDeflate(path, { level: 6 }) : new ZipPassThrough(path);
-      archive.add(entry);
-      if (!bytes.length) entry.push(bytes, true);
-      for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
-        entry.push(bytes.subarray(offset, offset + CHUNK_BYTES), offset + CHUNK_BYTES >= bytes.length);
-        if (failure) throw failure;
-        await yieldControl();
-      }
-    };
-    return {
-      add(path, bytes, { compress = true } = {}) {
-        const result = tail.then(() => append(path, bytes, compress));
-        tail = result;
-        return result;
-      },
-      async finish() {
-        await tail;
-        archive.end();
-        if (failure) throw failure;
-        if (!finished) throw new Error("\u538B\u7F29\u5305\u672A\u80FD\u5B8C\u6210");
-        const blob = new Blob(parts, { type: "application/zip" });
-        parts.length = 0;
-        return blob;
-      },
-      get count() {
-        return paths.size;
-      }
-    };
-  }
-
-  // src/download.js
-  async function saveBlob(blob, fileName, downloads, urlApi = URL) {
-    const objectUrl = urlApi.createObjectURL(blob);
-    let downloadId = null;
-    const early = /* @__PURE__ */ new Map();
-    let finish;
-    const completion = new Promise((resolve) => {
-      finish = resolve;
-    });
-    const inspect = (item) => {
-      if (item.state === "complete") finish();
-      if (item.state === "interrupted") finish(new Error(`\u6587\u4EF6\u4FDD\u5B58\u4E2D\u65AD\uFF1A${item.error || "\u6D4F\u89C8\u5668\u672A\u5B8C\u6210\u4E0B\u8F7D"}`));
-    };
-    const onChanged = (change) => {
-      const item = { state: change.state?.current, error: change.error?.current };
-      if (downloadId === null) {
-        early.set(change.id, item);
-        return;
-      }
-      if (change.id === downloadId) inspect(item);
-    };
-    downloads.onChanged.addListener(onChanged);
-    try {
-      downloadId = await downloads.download({ url: objectUrl, filename: fileName, saveAs: true });
-      const items = await downloads.search({ id: downloadId });
-      if (!items.length) throw new Error("\u6D4F\u89C8\u5668\u672A\u8FD4\u56DE\u6587\u4EF6\u4FDD\u5B58\u72B6\u6001");
-      inspect(items[0]);
-      if (early.has(downloadId)) inspect(early.get(downloadId));
-      const error = await completion;
-      if (error) throw error;
-      return downloadId;
-    } finally {
-      downloads.onChanged.removeListener(onChanged);
-      urlApi.revokeObjectURL(objectUrl);
-    }
-  }
-
-  // src/request.js
-  var REQUEST_TIMEOUT_MS = 2e4;
-  function httpError(response) {
-    const error = new Error(`HTTP ${response.status}`);
-    error.status = response.status;
-    error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
-    const retryAfter = response.headers?.get?.("retry-after");
-    if (retryAfter) {
-      const seconds = Number(retryAfter);
-      const milliseconds = Number.isFinite(seconds) ? seconds * 1e3 : Date.parse(retryAfter) - Date.now();
-      if (Number.isFinite(milliseconds)) error.retryAfterMs = Math.min(6e4, Math.max(0, milliseconds));
-    }
-    return error;
-  }
-  async function requestResource(url, { request = fetch, signal, timeoutMs = REQUEST_TIMEOUT_MS, read, ...options }) {
-    throwIfAborted(signal);
-    const controller = new AbortController();
-    const cancel = () => controller.abort(signal.reason);
-    signal?.addEventListener("abort", cancel, { once: true });
-    const timeout = new Error(`\u8BF7\u6C42\u8D85\u8FC7 ${timeoutMs / 1e3} \u79D2\u672A\u5B8C\u6210`);
-    timeout.retryable = true;
-    const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(timeout), timeoutMs) : null;
-    try {
-      return await abortable((async () => {
-        let receivedResponse = false;
+    var cbf = function() {
+      var out = new u8(tot + 22), oe = o, cdl = tot - o;
+      tot = 0;
+      for (var i2 = 0; i2 < slft; ++i2) {
+        var f = files[i2];
         try {
-          const response = await request(url, { ...options, signal: controller.signal });
-          receivedResponse = true;
-          return await read(response);
-        } catch (error) {
-          if (controller.signal.aborted) throw controller.signal.reason;
-          if ((!receivedResponse || error.name === "TypeError") && error.retryable === void 0) error.retryable = true;
-          throw error;
-        }
-      })(), controller.signal);
-    } finally {
-      if (timer !== null) clearTimeout(timer);
-      signal?.removeEventListener("abort", cancel);
-    }
-  }
-
-  // src/retry.js
-  async function retryOperation(operation, options = {}) {
-    const {
-      attempts = 3,
-      delays = [1500, 3500],
-      shouldRetry = () => true,
-      onRetry = () => {
-      },
-      wait = delay,
-      signal
-    } = options;
-    if (!Number.isInteger(attempts) || attempts < 1) throw new TypeError("attempts \u5FC5\u987B\u662F\u6B63\u6574\u6570");
-    let lastError;
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      throwIfAborted(signal);
-      try {
-        return await operation(attempt);
-      } catch (error) {
-        lastError = error;
-        throwIfAborted(signal);
-        if (error?.name === "AbortError" || attempt >= attempts || !shouldRetry(error, attempt)) throw error;
-        const delayMs = Math.max(error?.retryAfterMs || 0, delays[Math.min(attempt - 1, delays.length - 1)] ?? 0);
-        await onRetry({ error, attempt, nextAttempt: attempt + 1, delayMs });
-        if (delayMs > 0) await wait(delayMs, signal);
-      }
-    }
-    throw lastError;
-  }
-
-  // src/concurrency.js
-  async function mapWithConcurrency(items, concurrency, operation) {
-    if (!Number.isInteger(concurrency) || concurrency < 1) throw new TypeError("\u5E76\u53D1\u6570\u5FC5\u987B\u662F\u6B63\u6574\u6570");
-    if (typeof operation !== "function") throw new TypeError("\u5E76\u53D1\u4EFB\u52A1\u5FC5\u987B\u662F\u51FD\u6570");
-    const results = new Array(items.length);
-    let cursor = 0;
-    let failure = null;
-    const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-      while (cursor < items.length && !failure) {
-        const index = cursor;
-        cursor += 1;
-        try {
-          results[index] = await operation(items[index], index);
-        } catch (error) {
-          failure = error;
+          var l = f.c.length;
+          wzh(out, tot, f, f.f, f.u, l);
+          var badd = 30 + f.f.length + exfl(f.extra);
+          var loc = tot + badd;
+          out.set(f.c, loc);
+          wzh(out, o, f, f.f, f.u, l, tot, f.m), o += 16 + badd + (f.m ? f.m.length : 0), tot = loc + l;
+        } catch (e) {
+          return cbd(e, null);
         }
       }
-    });
-    await Promise.all(workers);
-    if (failure) throw failure;
-    return results;
-  }
-
-  // src/shared.js
-  var WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
-  function isZhihuUrl(input) {
-    try {
-      return /(^|\.)zhihu\.com$/i.test(new URL(input).hostname);
-    } catch {
-      return false;
-    }
-  }
-  function parsePaidColumnUrl(input) {
-    let url;
-    try {
-      url = new URL(input);
-    } catch {
-      return null;
-    }
-    if (!isZhihuUrl(url.href)) return null;
-    const path = url.pathname.replace(/\/+$/, "");
-    let match = path.match(/^\/column\/(c_\d+)$/);
-    if (url.hostname === "www.zhihu.com" && match) {
-      return { columnId: match[1], sectionId: null, kind: "catalog" };
-    }
-    match = path.match(/^\/p\/(\d+)$/);
-    if ((url.hostname === "zhuanlan.zhihu.com" || url.hostname === "www.zhihu.com") && match) {
-      return { columnId: null, sectionId: match[1], kind: "section" };
-    }
-    match = path.match(/^\/market\/paid_column\/(\d+)(?:\/section\/(\d+))?$/);
-    if (match) {
-      return {
-        columnId: match[1],
-        sectionId: match[2] || null,
-        kind: match[2] ? "section" : "catalog"
-      };
-    }
-    match = path.match(/^\/xen\/market\/remix\/paid_column\/(\d+)(?:\/section\/(\d+))?$/);
-    if (match) {
-      return {
-        columnId: match[1],
-        sectionId: match[2] || null,
-        kind: match[2] ? "section" : "catalog"
-      };
-    }
-    match = path.match(/(?:^|\/)paid_column\/(\d+)(?:\/section\/(\d+))?(?:\/|$)/);
-    if (match) {
-      return {
-        columnId: match[1],
-        sectionId: match[2] || null,
-        kind: match[2] ? "section" : "catalog"
-      };
-    }
-    return null;
-  }
-  function sanitizeFilename(value, fallback = "\u672A\u547D\u540D", maxLength = 80) {
-    let output = String(value || "").replace(/[\u0000-\u001f<>:"/\\|?*]/g, "_").replace(/\s+/g, " ").replace(/[. ]+$/g, "").trim();
-    if (!output) output = fallback;
-    if (WINDOWS_RESERVED.test(output)) output = `_${output}`;
-    return Array.from(output).slice(0, maxLength).join("");
-  }
-  function escapeHtml(value) {
-    return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
-  }
-  function padNumber(value, width = 3) {
-    return String(value).padStart(width, "0");
-  }
-  function uniqueBy(items, keyOf) {
-    const seen = /* @__PURE__ */ new Set();
-    return items.filter((item) => {
-      const key = keyOf(item);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  }
-
-  // src/images.js
-  var IMAGE_CONCURRENCY = 4;
-  var IMAGE_CACHE_BYTES = 16 * 1024 * 1024;
-  var LOCALIZE_SVG_IMAGES = true;
-  function createImageCache(maxBytes = IMAGE_CACHE_BYTES) {
-    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new TypeError("\u56FE\u7247\u7F13\u5B58\u5BB9\u91CF\u5FC5\u987B\u662F\u975E\u8D1F\u5B89\u5168\u6574\u6570");
-    const entries = /* @__PURE__ */ new Map();
-    let size = 0;
-    return {
-      get(url) {
-        const entry = entries.get(url);
-        if (entry) {
-          entries.delete(url);
-          entries.set(url, entry);
-        }
-        return entry;
-      },
-      set(url, entry) {
-        if (entries.has(url)) {
-          size -= entries.get(url).bytes.length;
-          entries.delete(url);
-        }
-        if (entry.bytes.length > maxBytes || maxBytes === 0) return;
-        while (size + entry.bytes.length > maxBytes) {
-          const oldest = entries.keys().next().value;
-          size -= entries.get(oldest).bytes.length;
-          entries.delete(oldest);
-        }
-        entries.set(url, entry);
-        size += entry.bytes.length;
-      },
-      get bytes() {
-        return size;
-      }
+      wzf(out, o, files.length, cdl, oe);
+      cbd(null, out);
     };
-  }
-  function startsWith(bytes, values) {
-    return values.every((value, index) => bytes[index] === value);
-  }
-  function imageType(bytes, contentType) {
-    const mime = String(contentType || "").split(";")[0].trim().toLowerCase();
-    if (mime && !mime.startsWith("image/") && mime !== "application/octet-stream") {
-      throw new Error(`\u56FE\u7247\u8BF7\u6C42\u8FD4\u56DE\u4E86 ${mime}\uFF0C\u4E0D\u662F\u56FE\u7247`);
-    }
-    if (startsWith(bytes, [137, 80, 78, 71, 13, 10, 26, 10])) return { extension: "png", mime: "image/png" };
-    if (startsWith(bytes, [255, 216, 255])) return { extension: "jpg", mime: "image/jpeg" };
-    const head = String.fromCharCode(...bytes.subarray(0, 32));
-    if (/^GIF8[79]a/.test(head)) return { extension: "gif", mime: "image/gif" };
-    if (head.startsWith("RIFF") && head.slice(8, 12) === "WEBP") return { extension: "webp", mime: "image/webp" };
-    if (head.slice(4, 8) === "ftyp" && /avif|avis/.test(head.slice(8))) return { extension: "avif", mime: "image/avif" };
-    if (mime === "image/svg+xml") return { extension: "svg", mime };
-    throw new Error("\u56FE\u7247\u6570\u636E\u683C\u5F0F\u65E0\u6548\u6216\u4E0D\u53D7\u652F\u6301");
-  }
-  function validateSvg(bytes) {
-    const document2 = new DOMParser().parseFromString(new TextDecoder().decode(bytes), "image/svg+xml");
-    const root = document2.documentElement;
-    if (root.localName !== "svg" || document2.querySelector("parsererror")) throw new Error("SVG \u56FE\u7247\u65E0\u6CD5\u89E3\u6790");
-    if (document2.doctype || [...document2.childNodes].some((node) => node.nodeType === 7)) {
-      throw new Error("SVG \u5305\u542B\u6587\u6863\u58F0\u660E\u6216\u5904\u7406\u6307\u4EE4\uFF0C\u672A\u4FDD\u5B58\u4E3A\u672C\u5730\u56FE\u7247");
-    }
-    for (const element of [root, ...root.querySelectorAll("*")]) {
-      if (element.namespaceURI !== "http://www.w3.org/2000/svg" || /^(script|foreignobject|iframe|object|embed|style|a|set|animate.*|discard)$/i.test(element.localName)) {
-        throw new Error("SVG \u5305\u542B\u6D3B\u52A8\u5185\u5BB9\uFF0C\u672A\u4FDD\u5B58\u4E3A\u672C\u5730\u56FE\u7247");
-      }
-      for (const attribute of element.attributes) {
-        const externalCssUrl = [...attribute.value.matchAll(/url\(\s*([^)]*)\)/gi)].some((match) => !match[1].replace(/^["']|["']$/g, "").trim().startsWith("#"));
-        if (/^on|^xml:base$/i.test(attribute.name) || /href$|^src$/i.test(attribute.name) && !attribute.value.startsWith("#") || externalCssUrl || /[@\\]/.test(attribute.value)) {
-          throw new Error("SVG \u5305\u542B\u6D3B\u52A8\u5185\u5BB9\u6216\u5916\u90E8\u8D44\u6E90\uFF0C\u672A\u4FDD\u5B58\u4E3A\u672C\u5730\u56FE\u7247");
+    if (!lft)
+      cbf();
+    var _loop_1 = function(i2) {
+      var fn = k[i2];
+      var _a2 = r[fn], file = _a2[0], p = _a2[1];
+      var c = crc(), size = file.length;
+      c.p(file);
+      var f = strToU8(fn), s = f.length;
+      var com = p.comment, m = com && strToU8(com), ms = m && m.length;
+      var exl = exfl(p.extra);
+      var compression = p.level == 0 ? 0 : 8;
+      var cbl = function(e, d) {
+        if (e) {
+          tAll();
+          cbd(e, null);
+        } else {
+          var l = d.length;
+          files[i2] = mrg(p, {
+            size,
+            crc: c.d(),
+            c: d,
+            f,
+            m,
+            u: s != fn.length || m && com.length != ms,
+            compression
+          });
+          o += 30 + s + exl + l;
+          tot += 76 + 2 * (s + exl) + (ms || 0) + l;
+          if (!--lft)
+            cbf();
         }
-      }
-    }
-  }
-  async function validateImage(bytes, contentType, decode = globalThis.createImageBitmap) {
-    const type = imageType(bytes, contentType);
-    if (type.extension === "svg") {
-      if (!LOCALIZE_SVG_IMAGES) throw new Error("\u5DF2\u5173\u95ED SVG \u672C\u5730\u4FDD\u5B58\uFF0C\u4FDD\u7559\u539F\u56FE\u5730\u5740");
-      validateSvg(bytes);
-    } else {
-      try {
-        const bitmap = await decode(new Blob([bytes], { type: type.mime }), { resizeWidth: 1, resizeHeight: 1 });
-        bitmap.close();
-      } catch (error) {
-        throw new Error(`\u56FE\u7247\u6570\u636E\u65E0\u6CD5\u89E3\u7801\uFF1A${error.message || error}`);
-      }
-    }
-    return type;
-  }
-  async function downloadImage(url, { signal, request = fetch, validate = validateImage } = {}) {
-    const parsed = new URL(url);
-    if (!["https:", "http:"].includes(parsed.protocol) && !/^data:image\//i.test(url)) throw new Error("\u56FE\u7247\u5730\u5740\u534F\u8BAE\u4E0D\u53D7\u652F\u6301");
-    return retryOperation(() => requestResource(url, {
-      request,
-      signal,
-      credentials: "include",
-      read: async (response) => {
-        if (!response.ok) throw httpError(response);
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        const type = await validate(bytes, response.headers.get("content-type"));
-        return { bytes, ...type };
-      }
-    }), { attempts: 3, delays: [700, 1800], signal, shouldRetry: (error) => error.retryable === true });
-  }
-  async function archiveImages(articles, archive, { signal, cache, onProgress = () => {
-  }, download = downloadImage } = {}) {
-    const tasks = /* @__PURE__ */ new Map();
-    articles.forEach((article, articleIndex) => {
-      (article.images || []).forEach((image, imageIndex) => {
-        if (!tasks.has(image.url)) tasks.set(image.url, {
-          url: image.url,
-          prefix: `assets/${padNumber(articleIndex + 1)}/${padNumber(imageIndex + 1, 2)}`
-        });
-      });
-    });
-    const results = /* @__PURE__ */ new Map();
-    let done = 0;
-    await mapWithConcurrency([...tasks.values()], IMAGE_CONCURRENCY, async (task) => {
-      let resource;
-      try {
-        resource = cache?.get(task.url);
-        if (!resource) {
-          throwIfAborted(signal);
-          resource = await download(task.url, { signal });
-          cache?.set(task.url, resource);
+      };
+      if (s > 65535)
+        cbl(err(11, 0, 1), null);
+      if (!compression)
+        cbl(null, file);
+      else if (size < 16e4) {
+        try {
+          cbl(null, deflateSync(file, p));
+        } catch (e) {
+          cbl(e, null);
         }
-      } catch (error) {
-        results.set(task.url, { ok: false, reason: error.message || String(error) });
-        onProgress(++done, tasks.size);
-        return;
-      }
-      const path = `${task.prefix}.${resource.extension}`;
-      await archive.add(path, resource.bytes, { compress: resource.extension === "svg" });
-      results.set(task.url, { ok: true, path });
-      onProgress(++done, tasks.size);
-    });
-    return results;
-  }
-  function localizeArticleImages(article, results = null) {
-    const byPlaceholder = new Map((article.images || []).map((image) => [image.placeholder, image]));
-    const failures = [];
-    for (const image of article.images || []) {
-      if (!results) continue;
-      const result = results.get(image.url);
-      if (!result) throw new Error("\u56FE\u7247\u4E0B\u8F7D\u7ED3\u679C\u7F3A\u5931");
-      if (!result.ok) failures.push({ sectionId: article.sectionId, title: article.title, url: image.url, reason: result.reason });
+      } else
+        term.push(deflate(file, p, cbl));
+    };
+    for (var i = 0; i < slft; ++i) {
+      _loop_1(i);
     }
-    const replace = (body, html) => String(body).replace(/__ZHIHU_EXPORT_IMAGE_[A-Za-z0-9_]+__/g, (placeholder) => {
-      const image = byPlaceholder.get(placeholder);
-      if (!image) return placeholder;
-      const result = results?.get(image.url);
-      const path = result?.ok ? `../${result.path}` : image.url;
-      return html ? escapeHtml(path) : path.replace(/[\s()<>]/g, (character) => character === "(" ? "%28" : character === ")" ? "%29" : encodeURIComponent(character));
-    });
-    return { markdown: replace(article.markdown, false), html: replace(article.html, true), failures };
+    return tAll;
   }
+  var mt = typeof queueMicrotask == "function" ? queueMicrotask : typeof setTimeout == "function" ? setTimeout : function(fn) {
+    fn();
+  };
 
   // node_modules/lucide/dist/esm/createElement.js
   var createElement = (tag, attrs, children = []) => {
@@ -1530,6 +1042,32 @@
     }
   };
 
+  // src/retry.js
+  async function retryOperation(operation, options = {}) {
+    const {
+      attempts = 3,
+      delays = [1500, 3500],
+      shouldRetry = () => true,
+      onRetry = () => {
+      },
+      wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
+    } = options;
+    if (!Number.isInteger(attempts) || attempts < 1) throw new TypeError("attempts \u5FC5\u987B\u662F\u6B63\u6574\u6570");
+    let lastError;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        return await operation(attempt);
+      } catch (error) {
+        lastError = error;
+        if (attempt >= attempts || !shouldRetry(error, attempt)) throw error;
+        const delayMs = delays[Math.min(attempt - 1, delays.length - 1)] ?? 0;
+        await onRetry({ error, attempt, nextAttempt: attempt + 1, delayMs });
+        if (delayMs > 0) await wait(delayMs);
+      }
+    }
+    throw lastError;
+  }
+
   // src/export-results.js
   function collectUnexportedArticles({ links, articles, failures, reason }) {
     const successfulIds = new Set(articles.map((article) => article.sectionId));
@@ -1544,6 +1082,83 @@
         reason,
         accessDenied: false
       };
+    });
+  }
+
+  // src/shared.js
+  var WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+  function isZhihuUrl(input) {
+    try {
+      return /(^|\.)zhihu\.com$/i.test(new URL(input).hostname);
+    } catch {
+      return false;
+    }
+  }
+  function parsePaidColumnUrl(input) {
+    let url;
+    try {
+      url = new URL(input);
+    } catch {
+      return null;
+    }
+    if (!isZhihuUrl(url.href)) return null;
+    const path = url.pathname.replace(/\/+$/, "");
+    let match = path.match(/^\/column\/(c_\d+)$/);
+    if (url.hostname === "www.zhihu.com" && match) {
+      return { columnId: match[1], sectionId: null, kind: "catalog" };
+    }
+    match = path.match(/^\/p\/(\d+)$/);
+    if ((url.hostname === "zhuanlan.zhihu.com" || url.hostname === "www.zhihu.com") && match) {
+      return { columnId: null, sectionId: match[1], kind: "section" };
+    }
+    match = path.match(/^\/market\/paid_column\/(\d+)(?:\/section\/(\d+))?$/);
+    if (match) {
+      return {
+        columnId: match[1],
+        sectionId: match[2] || null,
+        kind: match[2] ? "section" : "catalog"
+      };
+    }
+    match = path.match(/^\/xen\/market\/remix\/paid_column\/(\d+)(?:\/section\/(\d+))?$/);
+    if (match) {
+      return {
+        columnId: match[1],
+        sectionId: match[2] || null,
+        kind: match[2] ? "section" : "catalog"
+      };
+    }
+    match = path.match(/(?:^|\/)paid_column\/(\d+)(?:\/section\/(\d+))?(?:\/|$)/);
+    if (match) {
+      return {
+        columnId: match[1],
+        sectionId: match[2] || null,
+        kind: match[2] ? "section" : "catalog"
+      };
+    }
+    return null;
+  }
+  function sanitizeFilename(value, fallback = "\u672A\u547D\u540D", maxLength = 80) {
+    let output = String(value || "").replace(/[\u0000-\u001f<>:"/\\|?*]/g, "_").replace(/\s+/g, " ").replace(/[. ]+$/g, "").trim();
+    if (!output) output = fallback;
+    if (WINDOWS_RESERVED.test(output)) output = `_${output}`;
+    return Array.from(output).slice(0, maxLength).join("");
+  }
+  function escapeHtml(value) {
+    return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+  }
+  function padNumber(value, width = 3) {
+    return String(value).padStart(width, "0");
+  }
+  function sleep(milliseconds) {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  }
+  function uniqueBy(items, keyOf) {
+    const seen = /* @__PURE__ */ new Set();
+    return items.filter((item) => {
+      const key = keyOf(item);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
     });
   }
 
@@ -1601,6 +1216,24 @@
   }
   function messageChannelClosedError() {
     return new Error("\u6587\u7AE0\u9875\u5728\u6B63\u6587\u63D0\u53D6\u671F\u95F4\u53D1\u751F\u4E86\u8DF3\u8F6C\uFF0C\u7B49\u5F85\u9875\u9762\u7A33\u5B9A\u540E\u4ECD\u672A\u8FD4\u56DE\u7ED3\u679C");
+  }
+
+  // src/cached-batch.js
+  function validateArticleBatchResponse(response, expectedSectionIds) {
+    if (!response?.ok) throw new Error(response?.reason || "\u6279\u91CF\u6B63\u6587\u63D0\u53D6\u5931\u8D25");
+    if (!Array.isArray(response.articles)) throw new Error("\u6279\u91CF\u6B63\u6587\u7ED3\u679C\u683C\u5F0F\u65E0\u6548");
+    const expected = expectedSectionIds.map(String);
+    const expectedSet = new Set(expected);
+    const byId = /* @__PURE__ */ new Map();
+    for (const article of response.articles) {
+      const sectionId = String(article?.sectionId || "");
+      if (!expectedSet.has(sectionId)) throw new Error(`\u6279\u91CF\u7ED3\u679C\u5305\u542B\u672A\u8BF7\u6C42\u7684\u6587\u7AE0\uFF1A${sectionId || "\u672A\u77E5"}`);
+      if (byId.has(sectionId)) throw new Error(`\u6279\u91CF\u7ED3\u679C\u91CD\u590D\u8FD4\u56DE\u6587\u7AE0\uFF1A${sectionId}`);
+      byId.set(sectionId, article);
+    }
+    const missing = expected.filter((sectionId) => !byId.has(sectionId));
+    if (missing.length) throw new Error(`\u6279\u91CF\u7ED3\u679C\u7F3A\u5C11\u6587\u7AE0\uFF1A${missing.join("\u3001")}`);
+    return expected.map((sectionId) => byId.get(sectionId));
   }
 
   // src/cache-validation.js
@@ -2025,90 +1658,7 @@
     return result;
   }
 
-  // src/site-access.js
-  var PAUSE_ON_ACCESS_RESTRICTION = true;
-  function restrictedHttpStatus(status) {
-    return PAUSE_ON_ACCESS_RESTRICTION && [401, 403, 429].includes(Number(status));
-  }
-  function assertPageAccess(pageUrl) {
-    if (!PAUSE_ON_ACCESS_RESTRICTION || !pageUrl) return;
-    const path = new URL(pageUrl).pathname;
-    if (/^\/(?:account\/unhuman|captcha|challenge|signin)(?:\/|$)/i.test(path)) {
-      throw new SiteAccessRestrictionError("\u77E5\u4E4E\u8981\u6C42\u767B\u5F55\u6216\u5B89\u5168\u9A8C\u8BC1\uFF0C\u8BF7\u5148\u5728\u539F\u9875\u9762\u5904\u7406");
-    }
-  }
-  var SiteAccessRestrictionError = class extends Error {
-    constructor(reason) {
-      super(`\u77E5\u4E4E\u9650\u5236\u4E86\u5F53\u524D\u8BBF\u95EE\uFF0C\u5DF2\u505C\u6B62\u81EA\u52A8\u8BFB\u53D6\uFF1A${reason}`);
-      this.name = "SiteAccessRestrictionError";
-    }
-  };
-
   // src/tab-lifecycle.js
-  var PAGE_TAB_RECOVERY_LIMIT = 2;
-  var PageTabUnavailableError = class extends Error {
-    constructor(message, cause) {
-      super(message, { cause });
-      this.name = "PageTabUnavailableError";
-    }
-  };
-  function isMissingTabError(error, tabId) {
-    const match = String(error?.message || error).match(/No tab with id:\s*(\d+)\.?/i);
-    return Boolean(match && Number(match[1]) === tabId);
-  }
-  async function createRecoverablePageTab({ openTab, closeTab, signal, onRecovered, recoveryLimit = PAGE_TAB_RECOVERY_LIMIT }) {
-    if (!Number.isInteger(recoveryLimit) || recoveryLimit < 0) throw new TypeError("\u6807\u7B7E\u9875\u6062\u590D\u6B21\u6570\u5FC5\u987B\u662F\u975E\u8D1F\u6574\u6570");
-    let tabId = null;
-    let recoveries = 0;
-    const open = async () => {
-      throwIfAborted(signal);
-      let createdId;
-      try {
-        createdId = await openTab();
-      } catch (error) {
-        throwIfAborted(signal);
-        throw new PageTabUnavailableError(`\u65E0\u6CD5\u521B\u5EFA\u6B63\u6587\u8BFB\u53D6\u6807\u7B7E\u9875\uFF1A${error.message || error}`, error);
-      }
-      tabId = createdId;
-      if (signal?.aborted) {
-        await closeTab(tabId);
-        tabId = null;
-        throwIfAborted(signal);
-      }
-    };
-    await open();
-    return {
-      async read(operation) {
-        for (; ; ) {
-          throwIfAborted(signal);
-          try {
-            return await operation(tabId);
-          } catch (error) {
-            throwIfAborted(signal);
-            if (!isMissingTabError(error, tabId)) throw error;
-            const previousId = tabId;
-            try {
-              await closeTab(previousId);
-            } catch (closeError) {
-              throw new PageTabUnavailableError(`\u65E0\u6CD5\u6E05\u7406\u5931\u6548\u7684\u6B63\u6587\u6807\u7B7E\u9875\uFF1A${closeError.message || closeError}`, closeError);
-            }
-            tabId = null;
-            if (recoveries >= recoveryLimit) {
-              throw new PageTabUnavailableError("\u6B63\u6587\u8BFB\u53D6\u6807\u7B7E\u9875\u53CD\u590D\u5173\u95ED\uFF0C\u5DF2\u505C\u6B62\u7EE7\u7EED\u8BFB\u53D6\u5E76\u4FDD\u5B58\u5DF2\u5B8C\u6210\u5185\u5BB9", error);
-            }
-            recoveries += 1;
-            await open();
-            onRecovered({ previousId, tabId, recoveries });
-          }
-        }
-      },
-      async close() {
-        if (tabId === null) return;
-        await closeTab(tabId);
-        tabId = null;
-      }
-    };
-  }
   async function waitForStableTab({
     tabId,
     getTab,
@@ -2125,7 +1675,6 @@
     while (now() < deadline) {
       const tab = await getTab(tabId);
       const currentUrl = tab.url || "";
-      assertPageAccess(currentUrl);
       const loaded = requireComplete ? tab.status === "complete" : Boolean(currentUrl);
       if (loaded && currentUrl === previousUrl) {
         if (stableSince === null) stableSince = now();
@@ -2152,7 +1701,6 @@
     while (now() < deadline) {
       const tab = await getTab(tabId);
       lastUrl = tab.url || "";
-      assertPageAccess(lastUrl);
       if (lastUrl && pageMatchesExpectation(lastUrl, expectedPage)) return tab;
       await wait(pollMs);
     }
@@ -2185,7 +1733,6 @@
     sourceUrl: document.querySelector("#source-url"),
     stateLabel: document.querySelector("#state-label"),
     currentItem: document.querySelector("#current-item"),
-    sourceMethod: document.querySelector("#source-method"),
     progress: document.querySelector("#progress"),
     foundCount: document.querySelector("#found-count"),
     savedCount: document.querySelector("#saved-count"),
@@ -2208,28 +1755,18 @@
   var sourceTab = null;
   var activeTempTabIds = /* @__PURE__ */ new Set();
   var lastArchive = null;
-  var saving = false;
-  var imageCache = createImageCache();
   var session = freshSession();
   async function closeTempTab(tabId) {
     if (!Number.isInteger(tabId)) return;
+    activeTempTabIds.delete(tabId);
     try {
       await chrome.tabs.remove(tabId);
-      activeTempTabIds.delete(tabId);
-    } catch (error) {
-      if (/No tab with id|Invalid tab ID|already closed/i.test(error.message || "")) {
-        activeTempTabIds.delete(tabId);
-        return;
-      }
-      throw new Error(`\u4E34\u65F6\u6807\u7B7E\u9875\u5173\u95ED\u5931\u8D25\uFF1A${error.message || error}`);
+    } catch {
     }
   }
   function freshSession() {
     return {
       running: false,
-      controller: null,
-      taskId: null,
-      options: null,
       cancelled: false,
       columnId: null,
       columnTitle: "\u77E5\u4E4E\u4ED8\u8D39\u4E13\u680F",
@@ -2241,6 +1778,7 @@
       catalogComplete: null,
       expectedArticleCount: null,
       articleApiTabId: null,
+      articleApiValidated: false,
       articleApiOrigin: null,
       articleSourceMode: null,
       completedIds: /* @__PURE__ */ new Set()
@@ -2258,8 +1796,6 @@
     session.running = running;
     ui.start.disabled = running;
     ui.stop.hidden = !running;
-    ui.stop.disabled = false;
-    for (const control of [ui.markdown, ui.html, ui.images]) control.disabled = running;
     ui.retry.disabled = running;
     ui.saveAgain.disabled = running;
     document.body.classList.toggle("is-running", running);
@@ -2312,10 +1848,18 @@
     return waitForStableTab({
       tabId,
       getTab: (id) => chrome.tabs.get(id),
-      wait: (milliseconds) => delay(milliseconds, session.controller?.signal),
+      wait: sleep,
       timeoutMs,
       stableMs
     });
+  }
+  async function ensureContentScript(tabId) {
+    try {
+      await chrome.tabs.sendMessage(tabId, { type: "PING" });
+    } catch {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+      await sleep(250);
+    }
   }
   async function ensureExpectedPage(tabId, expectedPage) {
     return ensureExpectedTabPage({
@@ -2326,40 +1870,35 @@
     });
   }
   async function sendToTab(tabId, message, expectedPage) {
-    const signal = session.controller?.signal;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      throwIfAborted(signal);
+    const attempts = 2;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      await ensureContentScript(tabId);
       try {
-        return await abortable(chrome.tabs.sendMessage(tabId, { ...message, taskId: session.taskId }), signal);
+        return await chrome.tabs.sendMessage(tabId, message);
       } catch (error) {
-        throwIfAborted(signal);
         if (!isMessageChannelClosed(error)) throw error;
-        if (attempt === 1) throw messageChannelClosedError();
+        if (attempt === attempts) throw messageChannelClosedError();
         await ensureExpectedPage(tabId, expectedPage);
-        await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"], injectImmediately: true });
       }
     }
+    throw new Error("\u6B63\u6587\u63D0\u53D6\u6D88\u606F\u672A\u8FD4\u56DE\u7ED3\u679C");
   }
   async function sendToArticleApiTab(message) {
-    throwIfAborted(session.controller?.signal);
     const tab = await chrome.tabs.get(session.articleApiTabId);
     const expectedPage = expectedPageFromUrl(session.sourceUrl);
     if (!pageMatchesExpectation(tab.url || "", expectedPage)) {
       throw new Error("\u4E13\u680F\u6765\u6E90\u9875\u5DF2\u53D1\u751F\u53D8\u5316\uFF0C\u767B\u5F55\u6001\u6587\u7AE0\u63A5\u53E3\u4E0D\u53EF\u7EE7\u7EED\u4F7F\u7528");
     }
-    return sendToTab(tab.id, message, expectedPage);
+    await ensureContentScript(tab.id);
+    return chrome.tabs.sendMessage(tab.id, message);
   }
   async function visitPage(url, messageType) {
-    throwIfAborted(session.controller?.signal);
     const tab = await chrome.tabs.create({ url, active: false });
     const expectedPage = expectedPageFromUrl(url);
     activeTempTabIds.add(tab.id);
     try {
       await ensureExpectedPage(tab.id, expectedPage);
       if (session.cancelled) throw new Error("\u5BFC\u51FA\u5DF2\u505C\u6B62");
-      if (messageType === "EXTRACT_ARTICLE") {
-        return await extractSettledArticle(tab.id, { sectionId: expectedPage.sectionId }, expectedPage);
-      }
       return await sendToTab(tab.id, { type: messageType }, expectedPage);
     } finally {
       await closeTempTab(tab.id);
@@ -2384,7 +1923,6 @@
     let retainedApiTabId = null;
     let lastError = null;
     for (const candidateUrl of uniqueBy(candidateUrls, (url) => url)) {
-      throwIfAborted(session.controller?.signal);
       try {
         const expectedPage = expectedPageFromUrl(candidateUrl);
         const currentSourceTab = await chrome.tabs.get(sourceTabId);
@@ -2400,11 +1938,10 @@
           }
           return discovery;
         }, {
-          attempts: 2,
-          signal: session.controller?.signal,
-          shouldRetry: (error) => !session.cancelled && (error.retryable === true || isMessageChannelClosed(error)),
+          attempts: 3,
+          shouldRetry: () => !session.cancelled,
           onRetry: ({ error, nextAttempt }) => {
-            addLog(`\u76EE\u5F55\u8BFB\u53D6\u5931\u8D25\uFF1A${error.message || error}\uFF1B\u6B63\u5728\u81EA\u52A8\u91CD\u8BD5 ${nextAttempt} / 2`, "neutral");
+            addLog(`\u76EE\u5F55\u8BFB\u53D6\u5931\u8D25\uFF1A${error.message || error}\uFF1B\u6B63\u5728\u81EA\u52A8\u91CD\u8BD5 ${nextAttempt} / 3`, "neutral");
           }
         });
         if (useSourceTab && result.articleApiAvailable === true) retainedApiTabId = sourceTabId;
@@ -2419,6 +1956,7 @@
     session.catalogComplete = result.catalogComplete;
     session.expectedArticleCount = Number.isSafeInteger(result.expectedCount) ? result.expectedCount : null;
     session.articleApiTabId = retainedApiTabId;
+    session.articleApiValidated = false;
     session.articleApiOrigin = null;
     session.articleSourceMode = null;
     ui.columnTitle.textContent = session.columnTitle;
@@ -2438,7 +1976,7 @@
       throw new Error("\u9875\u9762\u4E2D\u6CA1\u6709\u53D1\u73B0\u7AE0\u8282\u3002\u8BF7\u6253\u5F00\u8BE5\u4E13\u680F\u7684\u4EFB\u4E00\u6B63\u6587\u9875\uFF0C\u518D\u70B9\u51FB\u6269\u5C55\u56FE\u6807");
     }
     addLog(`\u5DF2\u53D1\u73B0 ${session.knownLinks.length} \u7BC7\u7AE0\u8282`, "success");
-    if (session.articleApiTabId) addLog("\u5DF2\u51C6\u5907\u767B\u5F55\u6001\u6B63\u6587\u63A5\u53E3\uFF0C\u5F00\u59CB\u524D\u5C06\u6821\u9A8C\u8D26\u53F7\u6743\u9650\u4E0E\u6B63\u6587\u5B8C\u6574\u6027", "success");
+    if (session.articleApiTabId) addLog("\u5DF2\u51C6\u5907\u767B\u5F55\u6001\u6279\u91CF\u6B63\u6587\u63A5\u53E3\uFF0C\u5F00\u59CB\u524D\u5C06\u6821\u9A8C\u8D26\u53F7\u6743\u9650\u4E0E\u6B63\u6587\u5B8C\u6574\u6027", "success");
   }
   async function navigateToArticle(tabId, link) {
     const expectedPage = expectedPageFromUrl(link.url);
@@ -2447,7 +1985,7 @@
       tabId,
       expectedPage,
       getTab: (id) => chrome.tabs.get(id),
-      wait: (milliseconds) => delay(milliseconds, session.controller?.signal)
+      wait: sleep
     });
     if (tab?.matched === false) {
       await ensureExpectedPage(tabId, expectedPage);
@@ -2464,7 +2002,7 @@
         if (lastSectionId && lastSectionId !== String(link.sectionId)) return "";
         return String(probe?.fingerprint || "");
       },
-      wait: (milliseconds) => delay(milliseconds, session.controller?.signal),
+      wait: sleep,
       attempts: PAGE_READY_ATTEMPTS,
       intervalMs: PAGE_READY_INTERVAL_MS,
       stableSamples: 3,
@@ -2475,24 +2013,23 @@
       await ensureExpectedPage(tabId, expectedPage);
     }
     return assertExpectedArticleResult(
-      await sendToTab(tabId, { type: "EXTRACT_ARTICLE", settled: settle.settled, fingerprint: settle.fingerprint }, expectedPage),
-      link.sectionId,
-      session.columnId
+      await sendToTab(tabId, { type: "EXTRACT_ARTICLE", settled: settle.settled }, expectedPage),
+      link.sectionId
     );
   }
-  async function extractOneArticle(worker, link) {
-    return retryOperation(() => worker.read(async (tabId) => {
+  async function extractOneArticle(tabId, link) {
+    return retryOperation(async () => {
       if (session.cancelled) throw new Error("\u5BFC\u51FA\u5DF2\u505C\u6B62");
       const expectedPage = await navigateToArticle(tabId, link);
       const result = await extractSettledArticle(tabId, link, expectedPage);
       if (!result?.ok && !result?.accessDenied) {
         throw new Error(result?.reason || "\u6B63\u6587\u63D0\u53D6\u5931\u8D25");
       }
+      addKnownLinks(result?.discovered);
       return result;
-    }), {
+    }, {
       attempts: 3,
-      signal: session.controller?.signal,
-      shouldRetry: (error) => !session.cancelled && !(error instanceof PageTabUnavailableError) && !(error instanceof SiteAccessRestrictionError),
+      shouldRetry: () => !session.cancelled,
       onRetry: ({ error, nextAttempt }) => {
         addLog(`${link.title}\uFF1A${error.message}\uFF0C\u6B63\u5728\u81EA\u52A8\u91CD\u8BD5 ${nextAttempt} / 3`, "neutral");
       }
@@ -2515,7 +2052,7 @@
       if (next) claimedIds.add(next.sectionId);
       return next;
     };
-    const runWorker = async (worker) => {
+    const runWorker = async (tabId) => {
       for (let link = takeNext(); link; link = takeNext()) {
         if (session.cancelled || stopReason) return;
         const position = session.completedIds.size + 1;
@@ -2523,7 +2060,7 @@
         const eta = remainingTimeText(Date.now() - startedAt, processed, scope().length);
         setState("\u6B63\u5728\u9010\u7BC7\u63D0\u53D6\u6B63\u6587", `${position} / ${total} \xB7 ${link.title}${eta ? ` \xB7 ${eta}` : ""}`);
         try {
-          const article = await extractOneArticle(worker, link);
+          const article = await extractOneArticle(tabId, link);
           if (!article?.ok) {
             recordFailure(link, article?.reason || "\u6B63\u6587\u63D0\u53D6\u5931\u8D25", Boolean(article?.accessDenied));
             consecutiveFailures += 1;
@@ -2538,10 +2075,6 @@
           }
         } catch (error) {
           if (session.cancelled) return;
-          if (error instanceof PageTabUnavailableError || error instanceof SiteAccessRestrictionError) {
-            stopReason = error;
-            return;
-          }
           if (/当前 Chrome 会话没有显示完整正文/.test(error.message || "")) {
             stopReason = error;
             return;
@@ -2557,25 +2090,16 @@
         }
       }
     };
-    const workers = [];
+    const tabs = [];
     try {
       for (let index = 0; index < tabCount; index += 1) {
-        if (session.cancelled) break;
-        const worker = await createRecoverablePageTab({
-          openTab: async () => {
-            const tab = await chrome.tabs.create({ url: "about:blank", active: false });
-            activeTempTabIds.add(tab.id);
-            return tab.id;
-          },
-          closeTab: closeTempTab,
-          signal: session.controller.signal,
-          onRecovered: () => addLog("\u6B63\u6587\u8BFB\u53D6\u6807\u7B7E\u9875\u5DF2\u5173\u95ED\uFF0C\u5DF2\u91CD\u65B0\u521B\u5EFA\u5E76\u91CD\u8BD5\u5F53\u524D\u6587\u7AE0", "neutral")
-        });
-        workers.push(worker);
+        const tab = await chrome.tabs.create({ url: "about:blank", active: false });
+        activeTempTabIds.add(tab.id);
+        tabs.push(tab.id);
       }
-      await Promise.all(workers.map((worker) => runWorker(worker)));
+      await Promise.all(tabs.map((tabId) => runWorker(tabId)));
     } finally {
-      await Promise.all(workers.map((worker) => worker.close()));
+      await Promise.all(tabs.map((tabId) => closeTempTab(tabId)));
     }
     if (stopReason) throw stopReason;
   }
@@ -2592,7 +2116,7 @@
     addLog(`${link.title}\uFF1A${reason}`, "error");
   }
   function storeSuccessfulArticle(link, article) {
-    assertExpectedArticleResult(article, link.sectionId, session.columnId);
+    assertExpectedArticleResult(article, link.sectionId);
     if (!article?.ok) throw new Error(article?.reason || "\u6B63\u6587\u63D0\u53D6\u5931\u8D25");
     session.articles.push(article);
     session.completedIds.add(link.sectionId);
@@ -2606,7 +2130,6 @@
         sectionId: probeLink.sectionId
       });
       if (!result?.ok) {
-        if (result?.stopExport) throw new SiteAccessRestrictionError(result.reason);
         const error = new Error(result?.reason || "\u767B\u5F55\u6001\u6587\u7AE0\u63A5\u53E3\u4E0D\u53EF\u7528");
         error.accessDenied = Boolean(result?.accessDenied);
         error.truncated = Boolean(result?.truncated);
@@ -2615,8 +2138,7 @@
       return result;
     }, {
       attempts: 2,
-      signal: session.controller?.signal,
-      shouldRetry: (error) => !session.cancelled && !(error instanceof SiteAccessRestrictionError) && !error.accessDenied && !error.truncated,
+      shouldRetry: (error) => !session.cancelled && !error.accessDenied && !error.truncated,
       onRetry: ({ error }) => addLog(`\u6587\u7AE0\u63A5\u53E3\u6821\u9A8C\u5931\u8D25\uFF1A${error.message}\uFF1B\u6B63\u5728\u91CD\u8BD5`, "neutral")
     });
     if (!probe.anonymousDenied) throw new Error("\u65E0\u6CD5\u8BC1\u660E\u6587\u7AE0\u63A5\u53E3\u53EA\u5411\u5F53\u524D\u767B\u5F55\u4F1A\u8BDD\u8FD4\u56DE\u6B63\u6587");
@@ -2637,8 +2159,7 @@
       return result;
     }, {
       attempts: 2,
-      signal: session.controller?.signal,
-      shouldRetry: (error) => !session.cancelled && !(error instanceof SiteAccessRestrictionError) && !error.accessDenied
+      shouldRetry: (error) => !session.cancelled && !error.accessDenied
     });
   }
   async function decideArticleSource(queue) {
@@ -2649,7 +2170,6 @@
     try {
       probe = await probeArticleApiAccess(probeLink);
     } catch (error) {
-      if (error instanceof SiteAccessRestrictionError) throw error;
       return planArticleSource({ probeFailure: error.message || String(error) });
     }
     let apiArticle = null;
@@ -2658,75 +2178,147 @@
       apiArticle = assertExpectedArticleResult(probe.article, probeLink.sectionId, session.columnId);
       pageArticle = await readProbePage(probeLink);
     } catch (error) {
-      if (error instanceof SiteAccessRestrictionError) throw error;
       return planArticleSource({ probeFailure: error.message || String(error) });
     }
     const plan = planArticleSource({ comparison: compareArticleApiWithPage(apiArticle, pageArticle) });
-    storeSuccessfulArticle(probeLink, plan.mode === "api" ? apiArticle : pageArticle);
-    updateMetrics();
     return { ...plan, apiOrigin: probe.apiOrigin };
   }
   async function processArticleApiQueue(queue) {
-    if (session.articleSourceMode === "page") return processPageQueue(queue);
+    const pending = queue.filter((link) => !session.completedIds.has(link.sectionId));
+    if (!pending.length) return;
+    if (session.articleSourceMode === "page") return processPageQueue(pending);
     if (session.articleSourceMode !== "api") {
-      const plan = await decideArticleSource(queue);
-      ui.sourceMethod.textContent = plan.headline;
+      const plan = await decideArticleSource(pending);
       addLog(plan.headline, plan.mode === "api" ? "success" : "neutral");
       if (plan.detail) addLog(plan.detail, "neutral");
       session.articleSourceMode = plan.mode;
-      if (plan.mode !== "api") return processPageQueue(queue);
+      if (plan.mode !== "api") return processPageQueue(pending);
+      session.articleApiValidated = true;
       session.articleApiOrigin = plan.apiOrigin;
     }
-    const pending = queue.filter((link) => !session.completedIds.has(link.sectionId));
+    const batchSize = 12;
     const pageFallback = [];
-    let sourceFailure = null;
-    let restriction = null;
-    await mapWithConcurrency(pending, 4, async (link) => {
-      if (session.cancelled || restriction) return;
-      if (sourceFailure) {
-        pageFallback.push(link);
-        return;
-      }
-      setState("\u6B63\u5728\u8BFB\u53D6\u6B63\u6587", `${session.articles.length} / ${session.expectedArticleCount ?? session.knownLinks.length} \xB7 ${link.title}`);
+    for (let offset = 0; offset < pending.length && !session.cancelled; offset += batchSize) {
+      const batch = pending.slice(offset, offset + batchSize);
+      setState("\u6B63\u5728\u6279\u91CF\u5BFC\u51FA", `${Math.min(offset + batch.length, pending.length)} / ${pending.length}`);
+      let ordered;
       try {
-        const article = await sendToArticleApiTab({
-          type: "EXTRACT_API_ARTICLE",
-          columnId: session.columnId,
-          apiOrigin: session.articleApiOrigin,
-          sectionId: link.sectionId
+        ordered = await retryOperation(async () => {
+          const response = await sendToArticleApiTab({
+            type: "EXTRACT_API_ARTICLES",
+            columnId: session.columnId,
+            apiOrigin: session.articleApiOrigin,
+            sectionIds: batch.map((link) => link.sectionId)
+          });
+          return validateArticleBatchResponse(response, batch.map((link) => link.sectionId));
+        }, {
+          attempts: 2,
+          shouldRetry: () => !session.cancelled,
+          onRetry: ({ error }) => addLog(`\u6279\u91CF\u6B63\u6587\u8BFB\u53D6\u5931\u8D25\uFF1A${error.message || error}\uFF1B\u6B63\u5728\u91CD\u8BD5`, "neutral")
         });
-        if (!article?.ok) {
-          if (restrictedHttpStatus(article?.status)) {
-            restriction = new SiteAccessRestrictionError(article.reason || `HTTP ${article.status}`);
-            return;
-          }
-          addLog(`${link.title}\uFF1A${article?.reason || "\u6587\u7AE0\u63A5\u53E3\u6CA1\u6709\u8FD4\u56DE\u6B63\u6587"}\uFF0C\u5C06\u6539\u7528\u6B63\u5E38\u9875\u9762\u8BFB\u53D6`, "neutral");
-          pageFallback.push(link);
-          if (article?.status === 429 || article?.accessDenied) sourceFailure = article.reason;
-          return;
-        }
-        storeSuccessfulArticle(link, article);
-        updateMetrics();
       } catch (error) {
-        if (session.cancelled) return;
-        sourceFailure = error.message || String(error);
-        pageFallback.push(link);
+        const remaining = pending.slice(offset).filter((link) => !session.completedIds.has(link.sectionId));
+        const unresolved = uniqueBy([...pageFallback, ...remaining], (link) => link.sectionId).filter((link) => !session.completedIds.has(link.sectionId));
+        session.articleSourceMode = "page";
+        addLog(`\u767B\u5F55\u6001\u6587\u7AE0\u63A5\u53E3\u4E2D\u65AD\uFF1A${error.message || error}\uFF1B\u5269\u4F59 ${unresolved.length} \u7BC7\u6539\u7528\u9010\u7BC7\u9875\u9762\u63D0\u53D6`, "neutral");
+        return processPageQueue(unresolved, false);
       }
-    });
-    if (restriction) throw restriction;
-    if (session.cancelled || !pageFallback.length) return;
-    if (sourceFailure) session.articleSourceMode = "page";
-    addLog(`${pageFallback.length} \u7BC7\u63A5\u53E3\u6B63\u6587\u4E0D\u53EF\u7528\uFF0C\u6539\u7528\u9010\u7BC7\u9875\u9762\u63D0\u53D6${sourceFailure ? `\uFF1A${sourceFailure}` : ""}`, "neutral");
-    ui.sourceMethod.textContent = `\u90E8\u5206\u6587\u7AE0\u6539\u7528\u9010\u7BC7\u9875\u9762\u8BFB\u53D6${sourceFailure ? `\uFF1A${sourceFailure}` : ""}`;
-    const fallbackIds = new Set(pageFallback.map((link) => link.sectionId));
-    await processPageQueue(pending.filter((link) => fallbackIds.has(link.sectionId)), false);
+      for (let index = 0; index < batch.length; index += 1) {
+        const link = batch[index];
+        const article = ordered[index];
+        if (!article?.ok) {
+          pageFallback.push({ ...link, apiFailureReason: article?.reason || "\u6587\u7AE0\u63A5\u53E3\u6CA1\u6709\u8FD4\u56DE\u6B63\u6587" });
+          continue;
+        }
+        try {
+          storeSuccessfulArticle(link, article);
+        } catch (error) {
+          pageFallback.push({ ...link, apiFailureReason: error.message || String(error) });
+        }
+        updateMetrics();
+      }
+      await sleep(80);
+    }
+    if (!pageFallback.length || session.cancelled) return;
+    addLog(`${pageFallback.length} \u7BC7\u63A5\u53E3\u6B63\u6587\u4E0D\u53EF\u7528\uFF0C\u6539\u7528\u9010\u7BC7\u9875\u9762\u63D0\u53D6`, "neutral");
+    await processPageQueue(pageFallback, false);
+    updateMetrics();
   }
   async function processQueue(queue) {
     if (session.articleApiTabId && /^c_\d+$/.test(String(session.columnId || ""))) {
       return processArticleApiQueue(queue);
     }
-    ui.sourceMethod.textContent = "\u9010\u7BC7\u8BFB\u53D6\u6B63\u6587\uFF1A\u5F53\u524D\u6765\u6E90\u9875\u6CA1\u6709\u53EF\u7528\u7684\u6B63\u6587\u63A5\u53E3";
     return processPageQueue(queue);
+  }
+  function extensionFrom(url, contentType) {
+    const type = String(contentType || "").split(";")[0].toLowerCase();
+    const byType = {
+      "image/jpeg": "jpg",
+      "image/png": "png",
+      "image/gif": "gif",
+      "image/webp": "webp",
+      "image/avif": "avif",
+      "image/svg+xml": "svg"
+    };
+    if (byType[type]) return byType[type];
+    try {
+      const match = new URL(url).pathname.match(/\.([a-z0-9]{2,5})$/i);
+      if (match && /^(jpe?g|png|gif|webp|avif|svg)$/i.test(match[1])) {
+        return match[1].toLowerCase().replace("jpeg", "jpg");
+      }
+    } catch {
+    }
+    return "jpg";
+  }
+  async function fetchImage(image, articleNumber, imageNumber) {
+    try {
+      return await retryOperation(async () => {
+        const response = await fetch(image.url, { credentials: "include" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        const extension = extensionFrom(image.url, response.headers.get("content-type"));
+        const path = `assets/${padNumber(articleNumber)}/${padNumber(imageNumber, 2)}.${extension}`;
+        return { ...image, ok: true, bytes, path };
+      }, { attempts: 3, delays: [700, 1800] });
+    } catch (error) {
+      return { ...image, ok: false, path: image.url, reason: error.message || String(error) };
+    }
+  }
+  async function localizeImages(article, articleNumber, files) {
+    const images = article.images || [];
+    const results = [];
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(4, images.length) }, async () => {
+      while (cursor < images.length) {
+        const current = cursor;
+        cursor += 1;
+        results[current] = await fetchImage(images[current], articleNumber, current + 1);
+      }
+    });
+    await Promise.all(workers);
+    let markdown = article.markdown;
+    let html = article.html;
+    for (const image of results) {
+      const markdownPath = image.ok ? `../${image.path}` : image.path;
+      const htmlPath = image.ok ? `../${image.path}` : image.path;
+      markdown = markdown.replaceAll(image.placeholder, markdownPath);
+      html = html.replaceAll(image.placeholder, escapeHtml(htmlPath));
+      if (image.ok) files[image.path] = image.bytes;
+      else {
+        session.imageFailures.push({ sectionId: article.sectionId, title: article.title, url: image.url, reason: image.reason });
+        addLog(`${article.title}\uFF1A\u56FE\u7247\u672A\u4E0B\u8F7D\uFF08${image.reason}\uFF09\uFF0C\u6B64\u56FE\u7247\u4ECD\u9700\u8054\u7F51\u67E5\u770B`, "error");
+      }
+    }
+    return { markdown, html, downloaded: results.filter((item) => item.ok).length };
+  }
+  function keepRemoteImages(article) {
+    let markdown = article.markdown;
+    let html = article.html;
+    for (const image of article.images || []) {
+      markdown = markdown.replaceAll(image.placeholder, image.url);
+      html = html.replaceAll(image.placeholder, escapeHtml(image.url));
+    }
+    return { markdown, html, downloaded: 0 };
   }
   var readerCss = `
 :root { color-scheme: light; font-family: system-ui, "Microsoft YaHei", sans-serif; color: #202522; background: #f5f7f5; }
@@ -2764,50 +2356,45 @@ td, th { padding: 9px; border: 1px solid #ccd5ce; text-align: left; }
 <div class="source">\u5BFC\u51FA\u4E8E ${escapeHtml(exportedAt)}</div><h1>${escapeHtml(columnTitle)}</h1>
 <a class="source" href="${escapeHtml(session.sourceUrl)}">\u67E5\u770B\u77E5\u4E4E\u4E13\u680F</a></header><ol class="index-list">${items}</ol></main></body></html>`;
   }
+  function zipAsync(files) {
+    return new Promise((resolve, reject) => {
+      zip(files, { level: 6 }, (error, data) => error ? reject(error) : resolve(data));
+    });
+  }
   async function buildArchive(partial = false) {
     if (!session.articles.length) throw new Error("\u6CA1\u6709\u53EF\u4FDD\u5B58\u7684\u6B63\u6587");
     setState("\u6B63\u5728\u6574\u7406\u6587\u4EF6", "\u6B63\u5728\u4E0B\u8F7D\u6B63\u6587\u56FE\u7247");
-    const options = session.options;
-    const archive = createArchive();
-    if (options.html) await archive.add("reader.css", readerCss);
+    const files = {};
+    if (ui.html.checked) files["reader.css"] = strToU8(readerCss);
     const entries = [];
     const articleById = new Map(session.articles.map((article) => [article.sectionId, article]));
     const ordered = session.knownLinks.map((link) => articleById.get(link.sectionId)).filter(Boolean);
-    const imageResults = options.images ? await archiveImages(ordered, archive, {
-      signal: session.controller.signal,
-      cache: imageCache,
-      onProgress: (done, total) => {
-        if (!session.cancelled) setState("\u6B63\u5728\u4E0B\u8F7D\u56FE\u7247", `${done} / ${total} \u5F20`);
-      }
-    }) : null;
-    const imageCount = imageResults ? [...imageResults.values()].filter((result) => result.ok).length : 0;
+    let imageCount = 0;
     for (let index = 0; index < ordered.length; index += 1) {
       const article = ordered[index];
       const number = index + 1;
       setState("\u6B63\u5728\u6574\u7406\u6587\u4EF6", `${number} / ${ordered.length} \xB7 ${article.title}`);
-      const localized = localizeArticleImages(article, imageResults);
-      session.imageFailures.push(...localized.failures);
-      for (const failure of localized.failures) addLog(`${article.title}\uFF1A\u56FE\u7247\u672A\u4E0B\u8F7D\uFF08${failure.reason}\uFF09\uFF0C\u6B64\u56FE\u7247\u4ECD\u9700\u8054\u7F51\u67E5\u770B`, "error");
+      const localized = ui.images.checked ? await localizeImages(article, number, files) : keepRemoteImages(article);
+      imageCount += localized.downloaded;
       const fileName = `${padNumber(number)}-${sanitizeFilename(article.title, `\u7AE0\u8282-${article.sectionId}`, 70)}`;
       entries.push({ ...article, fileName });
-      if (options.markdown) {
+      if (ui.markdown.checked) {
         const markdown = `# ${article.title}
 
 > \u539F\u6587\uFF1A${article.url}
 
 ${localized.markdown}
 `;
-        await archive.add(`articles/${fileName}.md`, markdown);
+        files[`articles/${fileName}.md`] = strToU8(markdown);
       }
-      if (options.html) {
-        await archive.add(`html/${fileName}.html`, articleHtml(article, localized.html, number, ordered.length));
+      if (ui.html.checked) {
+        files[`html/${fileName}.html`] = strToU8(articleHtml(article, localized.html, number, ordered.length));
       }
     }
     const exportedAt = new Intl.DateTimeFormat("zh-CN", { dateStyle: "long", timeStyle: "medium" }).format(/* @__PURE__ */ new Date());
     const successfulIds = new Set(entries.map((entry) => entry.sectionId));
-    ui.stop.disabled = true;
-    const expectedArticleCount = session.expectedArticleCount;
-    const complete = !partial && !session.cancelled && session.failures.length === 0 && session.catalogComplete === true && session.knownLinks.length > 0 && successfulIds.size === session.knownLinks.length && session.knownLinks.length === expectedArticleCount && session.imageFailures.length === 0;
+    const expectedArticleCount = session.expectedArticleCount ?? session.knownLinks.length;
+    const complete = !partial && session.failures.length === 0 && session.catalogComplete !== false && session.knownLinks.length > 0 && successfulIds.size === session.knownLinks.length && session.knownLinks.length === expectedArticleCount && session.imageFailures.length === 0;
     const readmeLines = [
       `# ${session.columnTitle}`,
       "",
@@ -2815,7 +2402,7 @@ ${localized.markdown}
       `- \u6587\u7AE0\u6765\u6E90\uFF1A${session.sourceUrl}`,
       `- \u6210\u529F\u7AE0\u8282\uFF1A${entries.length}`,
       `- \u53D1\u73B0\u7AE0\u8282\uFF1A${session.knownLinks.length}`,
-      `- \u76EE\u5F55\u5E94\u6709\u7AE0\u8282\uFF1A${expectedArticleCount ?? "\u5C1A\u672A\u786E\u8BA4"}`,
+      `- \u76EE\u5F55\u5E94\u6709\u7AE0\u8282\uFF1A${expectedArticleCount}`,
       `- \u672A\u5B8C\u6210\u7AE0\u8282\uFF1A${session.failures.length}`,
       `- \u5168\u91CF\u5B8C\u6210\uFF1A${complete ? "\u662F" : "\u5426"}`,
       `- \u672C\u5730\u56FE\u7247\uFF1A${imageCount}`,
@@ -2824,13 +2411,12 @@ ${localized.markdown}
       "## \u76EE\u5F55",
       "",
       ...entries.map((entry, index) => {
-        const target = options.markdown ? `articles/${encodeURIComponent(entry.fileName)}.md` : `html/${encodeURIComponent(entry.fileName)}.html`;
+        const target = ui.markdown.checked ? `articles/${encodeURIComponent(entry.fileName)}.md` : `html/${encodeURIComponent(entry.fileName)}.html`;
         return `${index + 1}. [${entry.title}](${target})`;
       })
     ];
-    if (session.catalogComplete !== true) readmeLines.splice(11, 0, "- \u76EE\u5F55\u5B8C\u6574\u6027\u5C1A\u672A\u786E\u8BA4\uFF0C\u672C\u5305\u4EC5\u5305\u542B\u5F53\u524D\u5DF2\u53D1\u73B0\u7684\u6587\u7AE0\u3002");
-    await archive.add("README.md", readmeLines.join("\n"));
-    if (options.html) await archive.add("index.html", indexHtml(session.columnTitle, entries, exportedAt));
+    files["README.md"] = strToU8(readmeLines.join("\n"));
+    if (ui.html.checked) files["index.html"] = strToU8(indexHtml(session.columnTitle, entries, exportedAt));
     const exportInfo = {
       title: session.columnTitle,
       source: session.sourceUrl,
@@ -2848,42 +2434,35 @@ ${localized.markdown}
       failures: session.failures,
       imageFailures: session.imageFailures
     };
-    await archive.add("export-info.json", JSON.stringify(exportInfo, null, 2));
+    files["export-info.json"] = strToU8(JSON.stringify(exportInfo, null, 2));
     if (session.failures.length) {
-      await archive.add("\u672A\u5BFC\u51FA\u7AE0\u8282.txt", session.failures.map((item) => `${item.title}
+      files["\u672A\u5BFC\u51FA\u7AE0\u8282.txt"] = strToU8(session.failures.map((item) => `${item.title}
 ${item.url}
 \u539F\u56E0\uFF1A${item.reason}`).join("\n\n"));
     }
     if (session.imageFailures.length) {
-      await archive.add("\u672A\u4E0B\u8F7D\u56FE\u7247.txt", [
+      files["\u672A\u4E0B\u8F7D\u56FE\u7247.txt"] = strToU8([
         "\u4EE5\u4E0B\u56FE\u7247\u4E0B\u8F7D\u5931\u8D25\uFF0C\u6B63\u6587\u4E2D\u4FDD\u7559\u4E86\u539F\u59CB\u56FE\u7247\u5730\u5740\uFF0C\u9700\u8981\u8054\u7F51\u67E5\u770B\u3002\u53EF\u5728\u5BFC\u51FA\u9875\u70B9\u51FB\u201C\u91CD\u8BD5\u672A\u5B8C\u6210\u201D\u91CD\u65B0\u4E0B\u8F7D\u3002",
         ...session.imageFailures.map((item) => `${item.title}
 ${item.url}
 \u539F\u56E0\uFF1A${item.reason}`)
       ].join("\n\n"));
     }
-    setState("\u6B63\u5728\u751F\u6210\u538B\u7F29\u5305", `${archive.count} \u4E2A\u6587\u4EF6`);
-    const blob = await archive.finish();
+    setState("\u6B63\u5728\u751F\u6210\u538B\u7F29\u5305", `${Object.keys(files).length} \u4E2A\u6587\u4EF6`);
+    const bytes = await zipAsync(files);
     lastArchive = {
-      blob,
+      blob: new Blob([bytes], { type: "application/zip" }),
       fileName: `${sanitizeFilename(session.columnTitle, "\u77E5\u4E4E\u4ED8\u8D39\u4E13\u680F", 60)}-${complete ? "" : "\u90E8\u5206\u5BFC\u51FA-"}${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.zip`
     };
     return { articleCount: entries.length, imageCount, complete };
   }
   async function saveArchive() {
-    if (!lastArchive || saving) return;
-    saving = true;
-    ui.saveAgain.disabled = true;
-    ui.start.disabled = true;
-    ui.retry.disabled = true;
-    setState("\u6B63\u5728\u4FDD\u5B58\u6587\u4EF6", "\u7B49\u5F85\u6D4F\u89C8\u5668\u786E\u8BA4\u5199\u5165\u5B8C\u6210");
+    if (!lastArchive) return;
+    const objectUrl = URL.createObjectURL(lastArchive.blob);
     try {
-      await saveBlob(lastArchive.blob, lastArchive.fileName, chrome.downloads);
+      await chrome.downloads.download({ url: objectUrl, filename: lastArchive.fileName, saveAs: true });
     } finally {
-      saving = false;
-      ui.saveAgain.disabled = session.running;
-      ui.start.disabled = session.running;
-      ui.retry.disabled = session.running;
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 6e4);
     }
   }
   async function finishExport(partial = false) {
@@ -2891,19 +2470,15 @@ ${item.url}
     await saveArchive();
     const resultText = `${summary.articleCount} / ${session.expectedArticleCount ?? session.knownLinks.length} \u7BC7\u6587\u7AE0 \xB7 ${summary.imageCount} \u5F20\u672C\u5730\u56FE\u7247`;
     setState(summary.complete ? "\u5168\u90E8\u5BFC\u51FA\u5B8C\u6210" : "\u5DF2\u4FDD\u5B58\u90E8\u5206\u7ED3\u679C", resultText);
-    addLog(summary.complete ? "\u5168\u91CF\u538B\u7F29\u5305\u5DF2\u4FDD\u5B58" : `\u4ECD\u6709 ${session.failures.length} \u7BC7\u6587\u7AE0\u3001${session.imageFailures.length} \u5F20\u56FE\u7247\u672A\u5B8C\u6210${session.catalogComplete !== true ? "\uFF1B\u76EE\u5F55\u603B\u91CF\u5C1A\u672A\u786E\u8BA4" : ""}`, summary.complete ? "success" : "error");
+    addLog(summary.complete ? "\u5168\u91CF\u538B\u7F29\u5305\u5DF2\u751F\u6210" : `\u4ECD\u6709 ${session.failures.length} \u7BC7\u6587\u7AE0\u3001${session.imageFailures.length} \u5F20\u56FE\u7247\u672A\u5B8C\u6210`, summary.complete ? "success" : "error");
   }
   async function runExportAttempt() {
     let processingError = null;
     try {
-      if (!session.knownLinks.length || session.catalogComplete !== true) await discoverCatalog();
+      if (!session.knownLinks.length) await discoverCatalog();
       await processQueue(nextQueue());
     } catch (error) {
       processingError = error;
-      if (error instanceof SiteAccessRestrictionError) {
-        session.controller.abort(abortError("\u8BBF\u95EE\u53D7\u9650\uFF0C\u505C\u6B62\u65B0\u7684\u8BF7\u6C42"));
-        ui.sourceMethod.textContent = error.message;
-      }
       setError(error.message || String(error));
     }
     session.failures = collectUnexportedArticles({
@@ -2927,7 +2502,7 @@ ${item.url}
     }
   }
   async function startExport() {
-    if (session.running || saving) return;
+    if (session.running) return;
     if (!ui.markdown.checked && !ui.html.checked) {
       setError("\u8BF7\u81F3\u5C11\u9009\u62E9\u4E00\u79CD\u6B63\u6587\u683C\u5F0F");
       return;
@@ -2935,9 +2510,6 @@ ${item.url}
     setError("");
     setRunning(true);
     session.cancelled = false;
-    session.controller = new AbortController();
-    session.taskId = crypto.randomUUID();
-    session.options = Object.freeze({ markdown: ui.markdown.checked, html: ui.html.checked, images: ui.images.checked });
     session.completedIds = new Set(session.articles.map((article) => article.sectionId));
     session.failures = [];
     session.imageFailures = [];
@@ -2947,32 +2519,15 @@ ${item.url}
     await runExportAttempt();
   }
   async function stopExport() {
-    if (!session.running || ui.stop.disabled) return;
     session.cancelled = true;
-    session.controller.abort(abortError());
-    ui.stop.disabled = true;
-    setState("\u6B63\u5728\u505C\u6B62", "\u505C\u6B62\u65B0\u8BF7\u6C42\uFF0C\u6B63\u5728\u4FDD\u5B58\u5DF2\u5B8C\u6210\u5185\u5BB9");
-    const temporaryIds = [...activeTempTabIds];
-    const taskId = session.taskId;
-    const ids = /* @__PURE__ */ new Set([sourceTabId, ...temporaryIds]);
-    await Promise.all([...ids].map(async (tabId) => {
-      try {
-        await chrome.tabs.sendMessage(tabId, { type: "CANCEL_OPERATION", taskId });
-      } catch (error) {
-        if (!isMessageChannelClosed(error) && !/No tab|closed/i.test(error.message || "")) addLog(`\u505C\u6B62\u9875\u9762\u8BF7\u6C42\u5931\u8D25\uFF1A${error.message || error}`, "error");
-      }
-    }));
-    await Promise.all(temporaryIds.map((tabId) => closeTempTab(tabId)));
+    setState("\u6B63\u5728\u505C\u6B62", "\u5DF2\u5B8C\u6210\u7684\u6587\u7AE0\u4F1A\u4FDD\u7559");
+    await Promise.all([...activeTempTabIds].map((tabId) => closeTempTab(tabId)));
   }
   ui.start.addEventListener("click", startExport);
-  ui.stop.addEventListener("click", () => stopExport().catch((error) => setError(error.message || String(error))));
+  ui.stop.addEventListener("click", stopExport);
   ui.retry.addEventListener("click", startExport);
   ui.saveAgain.addEventListener("click", () => {
-    setError("");
-    saveArchive().then(() => setState("\u538B\u7F29\u5305\u5DF2\u4FDD\u5B58")).catch((error) => {
-      setError(`\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message || error}`);
-      setState("\u4FDD\u5B58\u672A\u5B8C\u6210");
-    });
+    saveArchive().catch((error) => setError(`\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message || error}`));
   });
   initialize();
 })();

@@ -768,19 +768,6 @@
   }
 
   // src/shared.js
-  function exactNumericId(value) {
-    if (typeof value === "string" && /^\d+$/.test(value)) return value;
-    if (Number.isSafeInteger(value) && value >= 0) return String(value);
-    return null;
-  }
-  function parseExactJsonNumbers(text) {
-    const tokens = /"(?:\\.|[^"\\])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
-    return JSON.parse(text.replace(tokens, (token, offset) => {
-      if (!/^\d+$/.test(token) || Number.isSafeInteger(Number(token))) return token;
-      if (/^\s*:/.test(text.slice(offset + token.length))) return token;
-      return `"${token}"`;
-    }));
-  }
   function isZhihuUrl(input) {
     try {
       return /(^|\.)zhihu\.com$/i.test(new URL(input).hostname);
@@ -838,6 +825,9 @@
     if (String(columnId).startsWith("c_")) return `https://zhuanlan.zhihu.com/p/${sectionId}`;
     return `https://www.zhihu.com/market/paid_column/${columnId}/section/${sectionId}`;
   }
+  function sleep(milliseconds) {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  }
   function uniqueBy(items, keyOf) {
     const seen = /* @__PURE__ */ new Set();
     return items.filter((item) => {
@@ -861,8 +851,8 @@
     }
     const candidateIds = [source?.id, item?.id];
     for (const candidate of candidateIds) {
-      const exact = exactNumericId(candidate);
-      if (exact !== null) return exact;
+      if (typeof candidate === "string" && /^\d+$/.test(candidate)) return candidate;
+      if (Number.isSafeInteger(candidate) && candidate >= 0) return String(candidate);
     }
     return null;
   }
@@ -882,85 +872,6 @@
       content: regularContent,
       requiresAccessValidation: source?.content_need_truncated === true
     };
-  }
-
-  // src/cancellation.js
-  function abortError(message = "\u7528\u6237\u505C\u6B62\u5BFC\u51FA") {
-    const error = new Error(message);
-    error.name = "AbortError";
-    return error;
-  }
-  function throwIfAborted(signal) {
-    if (signal?.aborted) throw signal.reason || abortError();
-  }
-  function abortable(operation, signal) {
-    if (!signal) return operation;
-    return new Promise((resolve, reject) => {
-      const onAbort = () => {
-        signal.removeEventListener("abort", onAbort);
-        reject(signal.reason || abortError());
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      Promise.resolve(operation).then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
-      if (signal.aborted) onAbort();
-    });
-  }
-  function delay(milliseconds, signal) {
-    throwIfAborted(signal);
-    return new Promise((resolve, reject) => {
-      const finish = () => {
-        signal?.removeEventListener("abort", onAbort);
-        resolve();
-      };
-      const timer = setTimeout(finish, milliseconds);
-      const onAbort = () => {
-        clearTimeout(timer);
-        signal.removeEventListener("abort", onAbort);
-        reject(signal.reason || abortError());
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-    });
-  }
-
-  // src/request.js
-  var REQUEST_TIMEOUT_MS = 2e4;
-  function httpError(response) {
-    const error = new Error(`HTTP ${response.status}`);
-    error.status = response.status;
-    error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
-    const retryAfter = response.headers?.get?.("retry-after");
-    if (retryAfter) {
-      const seconds = Number(retryAfter);
-      const milliseconds = Number.isFinite(seconds) ? seconds * 1e3 : Date.parse(retryAfter) - Date.now();
-      if (Number.isFinite(milliseconds)) error.retryAfterMs = Math.min(6e4, Math.max(0, milliseconds));
-    }
-    return error;
-  }
-  async function requestResource(url, { request = fetch, signal, timeoutMs = REQUEST_TIMEOUT_MS, read, ...options }) {
-    throwIfAborted(signal);
-    const controller = new AbortController();
-    const cancel = () => controller.abort(signal.reason);
-    signal?.addEventListener("abort", cancel, { once: true });
-    const timeout = new Error(`\u8BF7\u6C42\u8D85\u8FC7 ${timeoutMs / 1e3} \u79D2\u672A\u5B8C\u6210`);
-    timeout.retryable = true;
-    const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(timeout), timeoutMs) : null;
-    try {
-      return await abortable((async () => {
-        let receivedResponse = false;
-        try {
-          const response = await request(url, { ...options, signal: controller.signal });
-          receivedResponse = true;
-          return await read(response);
-        } catch (error) {
-          if (controller.signal.aborted) throw controller.signal.reason;
-          if ((!receivedResponse || error.name === "TypeError") && error.retryable === void 0) error.retryable = true;
-          throw error;
-        }
-      })(), controller.signal);
-    } finally {
-      if (timer !== null) clearTimeout(timer);
-      signal?.removeEventListener("abort", cancel);
-    }
   }
 
   // src/article-detail-api.js
@@ -1013,40 +924,55 @@
     };
     return normalizeColumnArticleItem(safeItem, columnId);
   }
-  async function fetchArticleDetail({ sectionId, columnId, apiOrigin, credentials = "include", request = fetch, signal }) {
+  async function fetchArticleDetail({
+    sectionId,
+    columnId,
+    apiOrigin,
+    credentials = "include",
+    request = fetch
+  }) {
+    let response;
     try {
-      return await requestResource(articleDetailApiUrl(sectionId, apiOrigin), {
-        request,
-        signal,
+      response = await request(articleDetailApiUrl(sectionId, apiOrigin), {
         credentials,
         cache: "no-store",
-        headers: { Accept: "application/json" },
-        read: async (response) => {
-          if (!response.ok) throw httpError(response);
-          const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase();
-          if (!contentType.includes("application/json")) throw new Error("\u6587\u7AE0\u63A5\u53E3\u6CA1\u6709\u8FD4\u56DE JSON");
-          let payload;
-          try {
-            payload = await response.json();
-          } catch (error) {
-            if (error.name !== "SyntaxError") throw error;
-            throw new Error(`\u6587\u7AE0\u63A5\u53E3 JSON \u65E0\u6CD5\u89E3\u6790\uFF1A${error.message}`);
-          }
-          return normalizeArticleDetailPayload(payload, columnId, sectionId);
-        }
+        headers: { Accept: "application/json" }
       });
     } catch (error) {
-      throwIfAborted(signal);
+      return { ok: false, sectionId, retryable: true, reason: error?.message || String(error) };
+    }
+    if (response.status === 401 || response.status === 403) {
       return {
         ok: false,
         sectionId,
-        status: error.status,
-        accessDenied: error.status === 401 || error.status === 403,
-        retryable: error.retryable === true,
-        retryAfterMs: error.retryAfterMs,
-        reason: error.message || String(error)
+        accessDenied: true,
+        status: response.status,
+        reason: `\u6587\u7AE0\u63A5\u53E3\u8FD4\u56DE HTTP ${response.status}`
       };
     }
+    if (response.status === 429 || response.status >= 500) {
+      return {
+        ok: false,
+        sectionId,
+        retryable: true,
+        status: response.status,
+        reason: `\u6587\u7AE0\u63A5\u53E3\u8FD4\u56DE HTTP ${response.status}`
+      };
+    }
+    if (!response.ok) {
+      return { ok: false, sectionId, status: response.status, reason: `\u6587\u7AE0\u63A5\u53E3\u8FD4\u56DE HTTP ${response.status}` };
+    }
+    const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase();
+    if (!contentType.includes("application/json")) {
+      return { ok: false, sectionId, reason: "\u6587\u7AE0\u63A5\u53E3\u6CA1\u6709\u8FD4\u56DE JSON" };
+    }
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      return { ok: false, sectionId, reason: "\u6587\u7AE0\u63A5\u53E3 JSON \u65E0\u6CD5\u89E3\u6790" };
+    }
+    return normalizeArticleDetailPayload(payload, columnId, sectionId);
   }
 
   // src/article-readiness.js
@@ -1198,15 +1124,16 @@
   function inferPaidColumnInfo(document2, pageUrl) {
     const direct = parsePaidColumnUrl(pageUrl);
     if (direct?.columnId) return direct;
-    for (const element of document2.querySelectorAll('link[rel="canonical"][href],meta[property="og:url"][content],a[href]')) {
+    const candidateUrls = [];
+    document2.querySelectorAll('link[rel="canonical"][href],meta[property="og:url"][content],a[href]').forEach((element) => {
       const value = element.getAttribute("href") || element.getAttribute("content");
-      if (!value) continue;
-      let candidate;
+      if (!value) return;
       try {
-        candidate = new URL(value, pageUrl).href;
+        candidateUrls.push(new URL(value, pageUrl).href);
       } catch {
-        continue;
       }
+    });
+    for (const candidate of candidateUrls) {
       const parsed = parsePaidColumnUrl(candidate);
       if (!parsed) continue;
       if (direct?.sectionId && parsed.columnId) {
@@ -1247,9 +1174,9 @@
     const raw = element.getAttribute("data-za-extra-module") || element.dataset?.zaExtraModule;
     if (!raw) return null;
     try {
-      const data = parseExactJsonNumbers(raw);
+      const data = JSON.parse(raw);
       const id = data?.card?.content?.id ?? data?.content?.id ?? data?.section?.id;
-      return exactNumericId(id);
+      return /^\d+$/.test(String(id || "")) ? String(id) : null;
     } catch {
       return null;
     }
@@ -1313,16 +1240,17 @@
     return score;
   }
   function selectContentRoot(document2) {
-    let best = null;
-    let bestScore = -1;
-    for (const element of document2.querySelectorAll(CONTENT_SELECTORS.join(","))) {
-      const score = scoreContent(element);
-      if (score > bestScore) {
-        best = element;
-        bestScore = score;
+    const candidates = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const selector of CONTENT_SELECTORS) {
+      for (const element of document2.querySelectorAll(selector)) {
+        if (seen.has(element)) continue;
+        seen.add(element);
+        candidates.push({ element, score: scoreContent(element) });
       }
     }
-    return best;
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0]?.score >= 0 ? candidates[0].element : null;
   }
   function bestImageSource(image, pageUrl) {
     const source = image.getAttribute("data-original") || image.getAttribute("data-actualsrc") || image.getAttribute("data-src") || image.currentSrc || image.getAttribute("src");
@@ -1350,7 +1278,7 @@
   function stripAttributes(root2) {
     for (const element of [root2, ...root2.querySelectorAll("*")]) {
       for (const attribute of [...element.attributes]) {
-        const keep = ["href", "src", "alt", "title", "id", "colspan", "rowspan"].includes(attribute.name);
+        const keep = ["href", "src", "alt", "title", "colspan", "rowspan"].includes(attribute.name);
         if (!keep) element.removeAttribute(attribute.name);
       }
     }
@@ -1414,14 +1342,16 @@ $$` : `$${tex}$`;
     const root2 = selectContentRoot(document2);
     if (!root2) return { ok: false };
     const bodyText = cleanText(document2.body?.textContent);
-    const text = cleanText(root2.textContent);
-    const textLength = text.length;
+    const textLength = cleanText(root2.textContent).length;
     if (ACCESS_LOCK_PATTERN2.test(bodyText) && (hasLockControl(document2) || textLength < 2e3)) {
       return { ok: false };
     }
+    let imageSignature = 0;
     const images = root2.querySelectorAll("img");
-    const imageSources = [...images].map((image) => bestImageSource(image, pageUrl) || "");
-    const formulas = [...root2.querySelectorAll("[data-tex]")].map((element) => element.getAttribute("data-tex"));
+    for (const image of images) {
+      const source = bestImageSource(image, pageUrl);
+      imageSignature += source ? source.length : 1;
+    }
     return {
       ok: true,
       sectionId: pageInfo.sectionId,
@@ -1430,19 +1360,9 @@ $$` : `$${tex}$`;
         textLength,
         root2.querySelectorAll("p").length,
         images.length,
-        fingerprintText(JSON.stringify([text, imageSources, formulas]))
+        imageSignature
       ].join(":")
     };
-  }
-  function fingerprintText(text) {
-    let first = 2166136261;
-    let second = 5381;
-    for (let index = 0; index < text.length; index += 1) {
-      const code = text.charCodeAt(index);
-      first = Math.imul(first ^ code, 16777619);
-      second = Math.imul(second, 33) ^ code;
-    }
-    return `${first >>> 0}-${second >>> 0}`;
   }
   function extractArticleDocument(document2, pageUrl, toMarkdown) {
     const pageInfo = inferPaidColumnInfo(document2, pageUrl);
@@ -1511,7 +1431,6 @@ $$` : `$${tex}$`;
   var DEFAULT_MAX_PAGES = 2e3;
   var API_ORIGINS2 = /* @__PURE__ */ new Set(["https://www.zhihu.com", "https://zhuanlan.zhihu.com"]);
   function nonNegativeInteger(value) {
-    if (typeof value !== "number" && (typeof value !== "string" || !/^\d+$/.test(value))) return null;
     const number = Number(value);
     return Number.isSafeInteger(number) && number >= 0 ? number : null;
   }
@@ -1564,8 +1483,6 @@ $$` : `$${tex}$`;
   function parseColumnArticlesPage(payload, columnId, currentOffset = 0, apiOrigin = "https://www.zhihu.com") {
     const data = Array.isArray(payload?.data) ? payload.data : [];
     const links = data.map((item) => articleFromItem(item, columnId)).filter(Boolean);
-    if (!Array.isArray(payload?.data)) throw new Error("\u76EE\u5F55\u63A5\u53E3\u6CA1\u6709\u8FD4\u56DE\u6587\u7AE0\u6570\u7EC4");
-    if (links.length !== data.length) throw new Error("\u76EE\u5F55\u4E2D\u5B58\u5728\u65E0\u6CD5\u786E\u8BA4\u7CBE\u786E\u6587\u7AE0\u8EAB\u4EFD\u7684\u8BB0\u5F55");
     const paging = payload?.paging || {};
     const total = nonNegativeInteger(paging.totals);
     const next2 = nextOffsetFromPaging(paging, columnId, apiOrigin, currentOffset);
@@ -1632,46 +1549,21 @@ $$` : `$${tex}$`;
     throw new Error(`\u76EE\u5F55\u8D85\u8FC7 ${maxPages} \u9875\uFF0C\u5DF2\u505C\u6B62\u4EE5\u907F\u514D\u65E0\u9650\u8BF7\u6C42`);
   }
 
-  // src/article-probe.js
-  var CACHE_ARTICLE_PROBES = true;
-  function createArticleProbe(document2, { enabled = CACHE_ARTICLE_PROBES, probe = probeArticleDocument } = {}) {
-    let cached = null;
-    let cachedUrl = "";
-    let sources = [];
-    let observer = null;
-    const invalidate = () => {
-      cached = null;
-      sources = [];
-    };
-    const observe = () => {
-      if (!enabled || observer) return;
-      observer = new document2.defaultView.MutationObserver(invalidate);
-      observer.observe(document2, { subtree: true, childList: true, characterData: true, attributes: true });
-    };
-    return {
-      read(pageUrl) {
-        if (!enabled) return probe(document2, pageUrl);
-        observe();
-        if (observer.takeRecords().length || cachedUrl !== pageUrl || sources.some(({ image, src }) => image.currentSrc !== src)) invalidate();
-        if (!cached) {
-          cached = probe(document2, pageUrl);
-          cachedUrl = pageUrl;
-          sources = Array.from(document2.images, (image) => ({ image, src: image.currentSrc }));
-        }
-        return cached;
-      },
-      release() {
-        observer?.disconnect();
-        observer = null;
-        invalidate();
+  // src/concurrency.js
+  async function mapWithConcurrency(items, concurrency, operation) {
+    if (!Number.isInteger(concurrency) || concurrency < 1) throw new TypeError("\u5E76\u53D1\u6570\u5FC5\u987B\u662F\u6B63\u6574\u6570");
+    if (typeof operation !== "function") throw new TypeError("\u5E76\u53D1\u4EFB\u52A1\u5FC5\u987B\u662F\u51FD\u6570");
+    const results = new Array(items.length);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      while (cursor < items.length) {
+        const index = cursor;
+        cursor += 1;
+        results[index] = await operation(items[index], index);
       }
-    };
-  }
-
-  // src/site-access.js
-  var PAUSE_ON_ACCESS_RESTRICTION = true;
-  function restrictedHttpStatus(status) {
-    return PAUSE_ON_ACCESS_RESTRICTION && [401, 403, 429].includes(Number(status));
+    });
+    await Promise.all(workers);
+    return results;
   }
 
   // src/retry.js
@@ -1682,22 +1574,19 @@ $$` : `$${tex}$`;
       shouldRetry = () => true,
       onRetry = () => {
       },
-      wait = delay,
-      signal
+      wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
     } = options;
     if (!Number.isInteger(attempts) || attempts < 1) throw new TypeError("attempts \u5FC5\u987B\u662F\u6B63\u6574\u6570");
     let lastError;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      throwIfAborted(signal);
       try {
         return await operation(attempt);
       } catch (error) {
         lastError = error;
-        throwIfAborted(signal);
-        if (error?.name === "AbortError" || attempt >= attempts || !shouldRetry(error, attempt)) throw error;
-        const delayMs = Math.max(error?.retryAfterMs || 0, delays[Math.min(attempt - 1, delays.length - 1)] ?? 0);
+        if (attempt >= attempts || !shouldRetry(error, attempt)) throw error;
+        const delayMs = delays[Math.min(attempt - 1, delays.length - 1)] ?? 0;
         await onRetry({ error, attempt, nextAttempt: attempt + 1, delayMs });
-        if (delayMs > 0) await wait(delayMs, signal);
+        if (delayMs > 0) await wait(delayMs);
       }
     }
     throw lastError;
@@ -1716,15 +1605,14 @@ $$` : `$${tex}$`;
     const style = getComputedStyle(element);
     return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
   }
-  async function clickMatchingButtons(pattern, signal) {
+  async function clickMatchingButtons(pattern) {
     const candidates = [...document.querySelectorAll("button,[role='button']")].filter(visible).filter((element) => pattern.test((element.textContent || "").trim()));
     for (const element of candidates.slice(0, 4)) {
-      throwIfAborted(signal);
       element.click();
-      await delay(250, signal);
+      await sleep(250);
     }
   }
-  async function scrollElement(element, maximumSteps = 18, onStep = null, delayMs = 220, signal) {
+  async function scrollElement(element, maximumSteps = 18, onStep = null, delayMs = 220) {
     let unchanged = 0;
     let previousHeight = 0;
     for (let step = 0; step < maximumSteps && unchanged < 5; step += 1) {
@@ -1733,21 +1621,21 @@ $$` : `$${tex}$`;
       else unchanged = 0;
       previousHeight = height;
       element.scrollTo?.({ top: height, behavior: "instant" });
-      await delay(delayMs, signal);
+      await sleep(delayMs);
       if (onStep) await onStep();
     }
   }
-  async function preparePage(mode, onStep = null, signal) {
+  async function preparePage(mode, onStep = null) {
     if (mode === "discover") {
-      await clickMatchingButtons(/^(目录|全部章节|全部文章|查看全部|查看更多|加载更多|展开目录)$/, signal);
+      await clickMatchingButtons(/^(目录|全部章节|全部文章|查看全部|查看更多|加载更多|展开目录)$/);
     }
     const scrollables = [...document.querySelectorAll("main,aside,div,section")].filter((element) => visible(element) && element.clientHeight > 180 && element.scrollHeight > element.clientHeight * 1.3).filter((element) => element.querySelector('[class*="ChapterItem"],a[href*="/market/paid_column/"],a[href*="zhuanlan.zhihu.com/p/"],a[href^="/p/"]')).slice(0, 3);
     const delayMs = mode === "discover" ? 420 : 220;
-    for (const element of scrollables) await scrollElement(element, 24, onStep, delayMs, signal);
-    await scrollElement(document.scrollingElement || document.documentElement, mode === "discover" ? 36 : 14, onStep, delayMs, signal);
-    await delay(500, signal);
+    for (const element of scrollables) await scrollElement(element, 24, onStep, delayMs);
+    await scrollElement(document.scrollingElement || document.documentElement, mode === "discover" ? 36 : 14, onStep, delayMs);
+    await sleep(500);
   }
-  async function discoverPage(signal) {
+  async function discoverPage() {
     let pageInfo = inferPaidColumnInfo(document, location.href);
     const collected = /* @__PURE__ */ new Map();
     const collect = async () => {
@@ -1756,7 +1644,7 @@ $$` : `$${tex}$`;
       for (const link of extractColumnLinks(document, location.href, pageInfo.columnId)) {
         if (!collected.has(link.sectionId)) collected.set(link.sectionId, link);
       }
-      await clickMatchingButtons(/^(查看更多|加载更多)$/, signal);
+      await clickMatchingButtons(/^(查看更多|加载更多)$/);
     };
     let catalogComplete = null;
     let expectedCount = null;
@@ -1766,24 +1654,23 @@ $$` : `$${tex}$`;
         const apiResult = await fetchAllColumnArticles({
           columnId: pageInfo.columnId,
           apiOrigin: location.hostname === "zhuanlan.zhihu.com" ? "https://zhuanlan.zhihu.com" : "https://www.zhihu.com",
-          requestPage: (url) => retryOperation(() => requestResource(url, {
-            signal,
-            credentials: "include",
-            cache: "no-store",
-            headers: { Accept: "application/json" },
-            read: async (response) => {
-              if (!response.ok) throw httpError(response);
-              const payload = await response.json();
-              if (payload?.error) throw new Error(payload.error.message || "\u76EE\u5F55\u63A5\u53E3\u62D2\u7EDD\u8BBF\u95EE");
-              return payload;
-            }
-          }), { attempts: 3, delays: [500, 1400], signal, shouldRetry: (error) => error.retryable === true })
+          requestPage: async (url) => retryOperation(async () => {
+            const response = await fetch(url, {
+              credentials: "include",
+              cache: "no-store",
+              headers: { Accept: "application/json" }
+            });
+            if (!response.ok) throw new Error(`\u76EE\u5F55\u63A5\u53E3\u8FD4\u56DE HTTP ${response.status}`);
+            const payload = await response.json();
+            if (payload?.error) throw new Error(payload.error.message || "\u76EE\u5F55\u63A5\u53E3\u62D2\u7EDD\u8BBF\u95EE");
+            return payload;
+          }, { attempts: 3, delays: [500, 1400] }),
+          onPage: async () => sleep(80)
         });
         for (const link of apiResult.links) collected.set(link.sectionId, link);
         catalogComplete = apiResult.complete;
         expectedCount = apiResult.expectedCount;
       } catch (error) {
-        throwIfAborted(signal);
         catalogComplete = false;
         discoveryError = error?.message || String(error);
       }
@@ -1802,9 +1689,8 @@ $$` : `$${tex}$`;
         articleApiAvailable: true
       };
     }
-    if (catalogComplete === false) return { ok: false, catalogComplete, reason: discoveryError };
     await collect();
-    await preparePage("discover", collect, signal);
+    await preparePage("discover", collect);
     await collect();
     if (!pageInfo) return { ok: false, reason: "\u5F53\u524D\u9875\u9762\u4E2D\u6CA1\u6709\u53D1\u73B0\u4ED8\u8D39\u4E13\u680F\u76EE\u5F55\u6216\u7AE0\u8282\u4FE1\u606F" };
     const links = [...collected.values()];
@@ -1821,27 +1707,18 @@ $$` : `$${tex}$`;
       articleApiAvailable: false
     };
   }
-  async function extractPage(message = {}, signal) {
+  async function extractPage(message = {}) {
     const extract = () => extractArticleDocument(document, location.href, (root2) => turndown.turndown(root2));
-    try {
-      if (message.settled === true) {
-        if (message.fingerprint !== articleProbe.read(location.href).fingerprint) {
-          return { ok: false, reason: "\u6B63\u6587\u5728\u7A33\u5B9A\u6821\u9A8C\u540E\u53D1\u751F\u53D8\u5316\uFF0C\u8BF7\u91CD\u8BD5" };
-        }
-        return extract();
-      }
-      return await waitForArticleExtraction({
-        probe: () => articleProbe.read(location.href),
-        extract,
-        wait: (milliseconds) => delay(milliseconds, signal),
-        emptyLimit: 12
-      });
-    } finally {
-      articleProbe.release();
-    }
+    if (message.settled === true) return extract();
+    return waitForArticleExtraction({
+      probe: () => probeArticleDocument(document, location.href),
+      extract,
+      wait: sleep,
+      emptyLimit: 12
+    });
   }
   function probePage() {
-    const probe = articleProbe.read(location.href);
+    const probe = probeArticleDocument(document, location.href);
     return {
       ok: true,
       sectionId: probe.ok ? probe.sectionId : "",
@@ -1851,7 +1728,7 @@ $$` : `$${tex}$`;
   function extractApiArticle(item, columnId) {
     return extractColumnArticleItem(item, columnId, document, (root2) => turndown.turndown(root2));
   }
-  async function authenticatedArticleDetail(sectionId, columnId, apiOrigin = location.origin, signal) {
+  async function authenticatedArticleDetail(sectionId, columnId, apiOrigin = location.origin) {
     let lastResult = null;
     try {
       return await retryOperation(async () => {
@@ -1859,20 +1736,17 @@ $$` : `$${tex}$`;
           sectionId,
           columnId,
           apiOrigin,
-          signal,
           credentials: "include"
         });
         lastResult = result;
         if (result.retryable) {
           const error = new Error(result.reason || "\u6587\u7AE0\u63A5\u53E3\u6682\u65F6\u4E0D\u53EF\u7528");
           error.articleResult = result;
-          error.retryAfterMs = result.retryAfterMs;
           throw error;
         }
         return result;
-      }, { attempts: 2, delays: [700], signal, shouldRetry: (error) => !restrictedHttpStatus(error.articleResult?.status) });
+      }, { attempts: 2, delays: [700] });
     } catch (error) {
-      throwIfAborted(signal);
       return error?.articleResult || lastResult || {
         ok: false,
         sectionId,
@@ -1880,8 +1754,8 @@ $$` : `$${tex}$`;
       };
     }
   }
-  async function extractApiArticleById(sectionId, columnId, apiOrigin, signal) {
-    const detail = await authenticatedArticleDetail(sectionId, columnId, apiOrigin, signal);
+  async function extractApiArticleById(sectionId, columnId, apiOrigin) {
+    const detail = await authenticatedArticleDetail(sectionId, columnId, apiOrigin);
     if (!detail.ok) return { ...detail, sectionId };
     try {
       return extractApiArticle(detail, columnId);
@@ -1889,7 +1763,7 @@ $$` : `$${tex}$`;
       return { ok: false, sectionId, reason: error?.message || String(error) };
     }
   }
-  async function probeArticleApi(message, signal) {
+  async function probeArticleApi(message) {
     const columnId = String(message.columnId || "");
     const sectionId = String(message.sectionId || "");
     if (!/^c_\d+$/.test(columnId) || !/^\d+$/.test(sectionId)) {
@@ -1909,12 +1783,8 @@ $$` : `$${tex}$`;
         sectionId,
         columnId,
         apiOrigin,
-        signal,
         credentials: "omit"
       });
-      if (anonymous.status === 429 && restrictedHttpStatus(anonymous.status)) {
-        return { ok: false, status: anonymous.status, stopExport: true, reason: anonymous.reason };
-      }
       if (anonymous.retryable) {
         noteFailure(apiOrigin, { reason: anonymous.reason });
         continue;
@@ -1923,10 +1793,7 @@ $$` : `$${tex}$`;
         noteFailure(apiOrigin, { reason: "\u533F\u540D\u8BF7\u6C42\u672A\u88AB\u62D2\u7EDD" });
         continue;
       }
-      const authenticated = await authenticatedArticleDetail(sectionId, columnId, apiOrigin, signal);
-      if (restrictedHttpStatus(authenticated.status)) {
-        return { ...authenticated, stopExport: true };
-      }
+      const authenticated = await authenticatedArticleDetail(sectionId, columnId, apiOrigin);
       if (!authenticated.ok) {
         noteFailure(apiOrigin, authenticated);
         continue;
@@ -1950,49 +1817,39 @@ $$` : `$${tex}$`;
       reason: failures.join("\uFF1B") || "\u767B\u5F55\u6001\u6587\u7AE0\u63A5\u53E3\u4E0D\u53EF\u7528"
     };
   }
-  async function extractApiArticleRequest(message, signal) {
+  async function extractApiArticles(message) {
     const columnId = String(message.columnId || "");
-    const sectionId = String(message.sectionId || "");
     const apiOrigin = String(message.apiOrigin || location.origin);
-    if (!/^c_\d+$/.test(columnId) || !/^\d+$/.test(sectionId)) return { ok: false, reason: "\u6B63\u6587\u53C2\u6570\u65E0\u6548" };
-    return extractApiArticleById(sectionId, columnId, apiOrigin, signal);
-  }
-  var operations = /* @__PURE__ */ new Map();
-  var articleProbe;
-  async function runOperation(message) {
-    if (!message.taskId) throw new Error("\u5BFC\u51FA\u8BF7\u6C42\u7F3A\u5C11\u4EFB\u52A1\u8EAB\u4EFD\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u5BFC\u51FA\u9875");
-    const controller = new AbortController();
-    const active = operations.get(message.taskId) || /* @__PURE__ */ new Set();
-    active.add(controller);
-    operations.set(message.taskId, active);
-    try {
-      if (message.type === "DISCOVER_COLUMN") return await discoverPage(controller.signal);
-      if (message.type === "PROBE_ARTICLE_API") return await probeArticleApi(message, controller.signal);
-      if (message.type === "EXTRACT_API_ARTICLE") return await extractApiArticleRequest(message, controller.signal);
-      return await extractPage(message, controller.signal);
-    } finally {
-      active.delete(controller);
-      if (!active.size) operations.delete(message.taskId);
+    const sectionIds = Array.isArray(message.sectionIds) ? message.sectionIds.map(String) : [];
+    if (!/^c_\d+$/.test(columnId) || !sectionIds.length || sectionIds.length > 20 || sectionIds.some((id) => !/^\d+$/.test(id))) {
+      return { ok: false, reason: "\u6B63\u6587\u6279\u6B21\u53C2\u6570\u65E0\u6548" };
     }
+    const articles = await mapWithConcurrency(
+      sectionIds,
+      4,
+      (sectionId) => extractApiArticleById(sectionId, columnId, apiOrigin)
+    );
+    return { ok: true, articles };
   }
-  if (!globalThis.__zhihuExporterInstalled) {
-    globalThis.__zhihuExporterInstalled = true;
-    articleProbe = createArticleProbe(document);
-    addEventListener("pagehide", () => articleProbe.release());
-    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if (message?.type === "CANCEL_OPERATION") {
-        articleProbe.release();
-        for (const controller of operations.get(message.taskId) || []) controller.abort(abortError());
-        sendResponse({ ok: true });
-        return false;
-      }
-      if (message?.type === "PROBE_ARTICLE") {
-        sendResponse(probePage());
-        return false;
-      }
-      if (!["DISCOVER_COLUMN", "EXTRACT_ARTICLE", "PROBE_ARTICLE_API", "EXTRACT_API_ARTICLE"].includes(message?.type)) return false;
-      runOperation(message).then(sendResponse).catch((error) => sendResponse({ ok: false, reason: error.message || String(error) }));
-      return true;
-    });
-  }
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (!message || ![
+      "PING",
+      "DISCOVER_COLUMN",
+      "PROBE_ARTICLE",
+      "EXTRACT_ARTICLE",
+      "PROBE_ARTICLE_API",
+      "EXTRACT_API_ARTICLES"
+    ].includes(message.type)) return false;
+    if (message.type === "PING") {
+      sendResponse({ ok: true });
+      return false;
+    }
+    if (message.type === "PROBE_ARTICLE") {
+      sendResponse(probePage());
+      return false;
+    }
+    const operation = message.type === "DISCOVER_COLUMN" ? discoverPage() : message.type === "PROBE_ARTICLE_API" ? probeArticleApi(message) : message.type === "EXTRACT_API_ARTICLES" ? extractApiArticles(message) : extractPage(message);
+    operation.then(sendResponse).catch((error) => sendResponse({ ok: false, reason: error?.message || String(error) }));
+    return true;
+  });
 })();

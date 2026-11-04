@@ -4,13 +4,10 @@ import { fetchArticleDetail } from "./article-detail-api.js";
 import { waitForArticleExtraction } from "./article-readiness.js";
 import { extractColumnArticleItem } from "./cached-article.js";
 import { fetchAllColumnArticles } from "./catalog-api.js";
-import { delay, abortError, throwIfAborted } from "./cancellation.js";
-import { requestResource, httpError } from "./request.js";
-import { detectPageTitle, extractArticleDocument, extractColumnLinks, inferPaidColumnInfo } from "./content-core.js";
-import { createArticleProbe } from "./article-probe.js";
-import { restrictedHttpStatus } from "./site-access.js";
+import { mapWithConcurrency } from "./concurrency.js";
+import { detectPageTitle, extractArticleDocument, extractColumnLinks, inferPaidColumnInfo, probeArticleDocument } from "./content-core.js";
 import { retryOperation } from "./retry.js";
-
+import { sleep } from "./shared.js";
 
 const turndown = new TurndownService({
   headingStyle: "atx",
@@ -26,18 +23,17 @@ function visible(element) {
   return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
 }
 
-async function clickMatchingButtons(pattern, signal) {
+async function clickMatchingButtons(pattern) {
   const candidates = [...document.querySelectorAll("button,[role='button']")]
     .filter(visible)
     .filter((element) => pattern.test((element.textContent || "").trim()));
   for (const element of candidates.slice(0, 4)) {
-    throwIfAborted(signal);
     element.click();
-    await delay(250, signal);
+    await sleep(250);
   }
 }
 
-async function scrollElement(element, maximumSteps = 18, onStep = null, delayMs = 220, signal) {
+async function scrollElement(element, maximumSteps = 18, onStep = null, delayMs = 220) {
   let unchanged = 0;
   let previousHeight = 0;
   for (let step = 0; step < maximumSteps && unchanged < 5; step += 1) {
@@ -46,14 +42,14 @@ async function scrollElement(element, maximumSteps = 18, onStep = null, delayMs 
     else unchanged = 0;
     previousHeight = height;
     element.scrollTo?.({ top: height, behavior: "instant" });
-    await delay(delayMs, signal);
+    await sleep(delayMs);
     if (onStep) await onStep();
   }
 }
 
-async function preparePage(mode, onStep = null, signal) {
+async function preparePage(mode, onStep = null) {
   if (mode === "discover") {
-    await clickMatchingButtons(/^(目录|全部章节|全部文章|查看全部|查看更多|加载更多|展开目录)$/, signal);
+    await clickMatchingButtons(/^(目录|全部章节|全部文章|查看全部|查看更多|加载更多|展开目录)$/);
   }
 
   const scrollables = [...document.querySelectorAll("main,aside,div,section")]
@@ -62,12 +58,12 @@ async function preparePage(mode, onStep = null, signal) {
     .slice(0, 3);
 
   const delayMs = mode === "discover" ? 420 : 220;
-  for (const element of scrollables) await scrollElement(element, 24, onStep, delayMs, signal);
-  await scrollElement(document.scrollingElement || document.documentElement, mode === "discover" ? 36 : 14, onStep, delayMs, signal);
-  await delay(500, signal);
+  for (const element of scrollables) await scrollElement(element, 24, onStep, delayMs);
+  await scrollElement(document.scrollingElement || document.documentElement, mode === "discover" ? 36 : 14, onStep, delayMs);
+  await sleep(500);
 }
 
-async function discoverPage(signal) {
+async function discoverPage() {
   let pageInfo = inferPaidColumnInfo(document, location.href);
   const collected = new Map();
   const collect = async () => {
@@ -76,7 +72,7 @@ async function discoverPage(signal) {
     for (const link of extractColumnLinks(document, location.href, pageInfo.columnId)) {
       if (!collected.has(link.sectionId)) collected.set(link.sectionId, link);
     }
-    await clickMatchingButtons(/^(查看更多|加载更多)$/, signal);
+    await clickMatchingButtons(/^(查看更多|加载更多)$/);
   };
 
   let catalogComplete = null;
@@ -89,24 +85,23 @@ async function discoverPage(signal) {
         apiOrigin: location.hostname === "zhuanlan.zhihu.com"
           ? "https://zhuanlan.zhihu.com"
           : "https://www.zhihu.com",
-        requestPage: (url) => retryOperation(() => requestResource(url, {
-          signal,
-          credentials: "include",
-          cache: "no-store",
-          headers: { Accept: "application/json" },
-          read: async (response) => {
-            if (!response.ok) throw httpError(response);
-            const payload = await response.json();
-            if (payload?.error) throw new Error(payload.error.message || "目录接口拒绝访问");
-            return payload;
-          }
-        }), { attempts: 3, delays: [500, 1400], signal, shouldRetry: (error) => error.retryable === true })
+        requestPage: async (url) => retryOperation(async () => {
+          const response = await fetch(url, {
+            credentials: "include",
+            cache: "no-store",
+            headers: { Accept: "application/json" }
+          });
+          if (!response.ok) throw new Error(`目录接口返回 HTTP ${response.status}`);
+          const payload = await response.json();
+          if (payload?.error) throw new Error(payload.error.message || "目录接口拒绝访问");
+          return payload;
+        }, { attempts: 3, delays: [500, 1400] }),
+        onPage: async () => sleep(80)
       });
       for (const link of apiResult.links) collected.set(link.sectionId, link);
       catalogComplete = apiResult.complete;
       expectedCount = apiResult.expectedCount;
     } catch (error) {
-      throwIfAborted(signal);
       catalogComplete = false;
       discoveryError = error?.message || String(error);
     }
@@ -127,9 +122,8 @@ async function discoverPage(signal) {
     };
   }
 
-  if (catalogComplete === false) return { ok: false, catalogComplete, reason: discoveryError };
   await collect();
-  await preparePage("discover", collect, signal);
+  await preparePage("discover", collect);
   await collect();
   if (!pageInfo) return { ok: false, reason: "当前页面中没有发现付费专栏目录或章节信息" };
   const links = [...collected.values()];
@@ -147,29 +141,22 @@ async function discoverPage(signal) {
   };
 }
 
-async function extractPage(message = {}, signal) {
+async function extractPage(message = {}) {
   const extract = () => extractArticleDocument(document, location.href, (root) => turndown.turndown(root));
   // The export page polls PROBE_ARTICLE on its own unthrottled clock and only
   // then asks for the conversion; a hidden tab's timers run at ~1 tick/second,
   // so waiting in here would cost seconds per article.
-  try {
-    if (message.settled === true) {
-      if (message.fingerprint !== articleProbe.read(location.href).fingerprint) {
-        return { ok: false, reason: "正文在稳定校验后发生变化，请重试" };
-      }
-      return extract();
-    }
-    return await waitForArticleExtraction({
-      probe: () => articleProbe.read(location.href),
-      extract,
-      wait: (milliseconds) => delay(milliseconds, signal),
-      emptyLimit: 12
-    });
-  } finally { articleProbe.release(); }
+  if (message.settled === true) return extract();
+  return waitForArticleExtraction({
+    probe: () => probeArticleDocument(document, location.href),
+    extract,
+    wait: sleep,
+    emptyLimit: 12
+  });
 }
 
 function probePage() {
-  const probe = articleProbe.read(location.href);
+  const probe = probeArticleDocument(document, location.href);
   return {
     ok: true,
     sectionId: probe.ok ? probe.sectionId : "",
@@ -181,7 +168,7 @@ function extractApiArticle(item, columnId) {
   return extractColumnArticleItem(item, columnId, document, (root) => turndown.turndown(root));
 }
 
-async function authenticatedArticleDetail(sectionId, columnId, apiOrigin = location.origin, signal) {
+async function authenticatedArticleDetail(sectionId, columnId, apiOrigin = location.origin) {
   let lastResult = null;
   try {
     return await retryOperation(async () => {
@@ -189,20 +176,17 @@ async function authenticatedArticleDetail(sectionId, columnId, apiOrigin = locat
         sectionId,
         columnId,
         apiOrigin,
-        signal,
         credentials: "include"
       });
       lastResult = result;
       if (result.retryable) {
         const error = new Error(result.reason || "文章接口暂时不可用");
         error.articleResult = result;
-        error.retryAfterMs = result.retryAfterMs;
         throw error;
       }
       return result;
-    }, { attempts: 2, delays: [700], signal, shouldRetry: (error) => !restrictedHttpStatus(error.articleResult?.status) });
+    }, { attempts: 2, delays: [700] });
   } catch (error) {
-    throwIfAborted(signal);
     return error?.articleResult || lastResult || {
       ok: false,
       sectionId,
@@ -211,8 +195,8 @@ async function authenticatedArticleDetail(sectionId, columnId, apiOrigin = locat
   }
 }
 
-async function extractApiArticleById(sectionId, columnId, apiOrigin, signal) {
-  const detail = await authenticatedArticleDetail(sectionId, columnId, apiOrigin, signal);
+async function extractApiArticleById(sectionId, columnId, apiOrigin) {
+  const detail = await authenticatedArticleDetail(sectionId, columnId, apiOrigin);
   if (!detail.ok) return { ...detail, sectionId };
   try {
     return extractApiArticle(detail, columnId);
@@ -221,7 +205,7 @@ async function extractApiArticleById(sectionId, columnId, apiOrigin, signal) {
   }
 }
 
-async function probeArticleApi(message, signal) {
+async function probeArticleApi(message) {
   const columnId = String(message.columnId || "");
   const sectionId = String(message.sectionId || "");
   if (!/^c_\d+$/.test(columnId) || !/^\d+$/.test(sectionId)) {
@@ -244,12 +228,8 @@ async function probeArticleApi(message, signal) {
       sectionId,
       columnId,
       apiOrigin,
-      signal,
       credentials: "omit"
     });
-    if (anonymous.status === 429 && restrictedHttpStatus(anonymous.status)) {
-      return { ok: false, status: anonymous.status, stopExport: true, reason: anonymous.reason };
-    }
     if (anonymous.retryable) {
       noteFailure(apiOrigin, { reason: anonymous.reason });
       continue;
@@ -259,10 +239,7 @@ async function probeArticleApi(message, signal) {
       continue;
     }
 
-    const authenticated = await authenticatedArticleDetail(sectionId, columnId, apiOrigin, signal);
-    if (restrictedHttpStatus(authenticated.status)) {
-      return { ...authenticated, stopExport: true };
-    }
+    const authenticated = await authenticatedArticleDetail(sectionId, columnId, apiOrigin);
     if (!authenticated.ok) {
       noteFailure(apiOrigin, authenticated);
       continue;
@@ -287,50 +264,52 @@ async function probeArticleApi(message, signal) {
   };
 }
 
-async function extractApiArticleRequest(message, signal) {
+async function extractApiArticles(message) {
   const columnId = String(message.columnId || "");
-  const sectionId = String(message.sectionId || "");
   const apiOrigin = String(message.apiOrigin || location.origin);
-  if (!/^c_\d+$/.test(columnId) || !/^\d+$/.test(sectionId)) return { ok: false, reason: "正文参数无效" };
-  return extractApiArticleById(sectionId, columnId, apiOrigin, signal);
-}
-
-const operations = new Map();
-let articleProbe;
-
-async function runOperation(message) {
-  if (!message.taskId) throw new Error("导出请求缺少任务身份，请重新打开导出页");
-  const controller = new AbortController();
-  const active = operations.get(message.taskId) || new Set();
-  active.add(controller);
-  operations.set(message.taskId, active);
-  try {
-    if (message.type === "DISCOVER_COLUMN") return await discoverPage(controller.signal);
-    if (message.type === "PROBE_ARTICLE_API") return await probeArticleApi(message, controller.signal);
-    if (message.type === "EXTRACT_API_ARTICLE") return await extractApiArticleRequest(message, controller.signal);
-    return await extractPage(message, controller.signal);
-  } finally {
-    active.delete(controller);
-    if (!active.size) operations.delete(message.taskId);
+  const sectionIds = Array.isArray(message.sectionIds) ? message.sectionIds.map(String) : [];
+  if (!/^c_\d+$/.test(columnId)
+    || !sectionIds.length
+    || sectionIds.length > 20
+    || sectionIds.some((id) => !/^\d+$/.test(id))) {
+    return { ok: false, reason: "正文批次参数无效" };
   }
+
+  const articles = await mapWithConcurrency(
+    sectionIds,
+    4,
+    (sectionId) => extractApiArticleById(sectionId, columnId, apiOrigin)
+  );
+  return { ok: true, articles };
 }
 
-// Recovery injection and the declared content script may meet on the same page.
-// Keep a single listener and a single cancellation registry per document.
-if (!globalThis.__zhihuExporterInstalled) {
-  globalThis.__zhihuExporterInstalled = true;
-  articleProbe = createArticleProbe(document);
-  addEventListener("pagehide", () => articleProbe.release());
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message?.type === "CANCEL_OPERATION") {
-      articleProbe.release();
-      for (const controller of operations.get(message.taskId) || []) controller.abort(abortError());
-      sendResponse({ ok: true });
-      return false;
-    }
-    if (message?.type === "PROBE_ARTICLE") { sendResponse(probePage()); return false; }
-    if (!["DISCOVER_COLUMN", "EXTRACT_ARTICLE", "PROBE_ARTICLE_API", "EXTRACT_API_ARTICLE"].includes(message?.type)) return false;
-    runOperation(message).then(sendResponse).catch((error) => sendResponse({ ok: false, reason: error.message || String(error) }));
-    return true;
-  });
-}
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!message || ![
+    "PING",
+    "DISCOVER_COLUMN",
+    "PROBE_ARTICLE",
+    "EXTRACT_ARTICLE",
+    "PROBE_ARTICLE_API",
+    "EXTRACT_API_ARTICLES"
+  ].includes(message.type)) return false;
+  if (message.type === "PING") {
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (message.type === "PROBE_ARTICLE") {
+    sendResponse(probePage());
+    return false;
+  }
+
+  const operation = message.type === "DISCOVER_COLUMN"
+    ? discoverPage()
+    : message.type === "PROBE_ARTICLE_API"
+      ? probeArticleApi(message)
+      : message.type === "EXTRACT_API_ARTICLES"
+        ? extractApiArticles(message)
+        : extractPage(message);
+  operation
+    .then(sendResponse)
+    .catch((error) => sendResponse({ ok: false, reason: error?.message || String(error) }));
+  return true;
+});

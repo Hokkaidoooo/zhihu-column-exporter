@@ -2,27 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { retryOperation } from "../src/retry.js";
 
-test("限流等待遵守 Retry-After，停止可立刻取消等待且不重发", async () => {
-  const waits = [];
-  let calls = 0;
-  await retryOperation(async () => {
-    if (++calls === 1) throw Object.assign(new Error("limited"), { retryAfterMs: 900 });
-  }, { delays: [1], wait: async (ms) => waits.push(ms) });
-  assert.deepEqual(waits, [900]);
-  const controller = new AbortController();
-  let notify;
-  const waiting = new Promise((resolve) => { notify = resolve; });
-  calls = 0;
-  const pending = retryOperation(async () => { calls++; throw new Error("network"); }, {
-    signal: controller.signal, delays: [10000], onRetry: notify
-  });
-  const rejection = assert.rejects(pending, { name: "AbortError" });
-  await waiting;
-  controller.abort();
-  await rejection;
-  assert.equal(calls, 1);
-});
-
 test("临时失败后自动重试并返回成功结果", async () => {
   let calls = 0;
   const retries = [];

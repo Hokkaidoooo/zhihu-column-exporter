@@ -1,6 +1,6 @@
 {
   "name": "zhihu-column-exporter",
-  "version": "1.6.1",
+  "version": "1.5.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,8 +9,7 @@
     "check": "npm run test && npm run lint && npm run build && npm run validate",
     "lint": "node scripts/check-syntax.mjs",
     "validate": "node scripts/validate.mjs",
-    "package": "node scripts/package.mjs",
-    "smoke:browser": "node scripts/browser-smoke.mjs"
+    "package": "node scripts/package.mjs"
   },
   "dependencies": {
     "fflate": "^0.8.2",

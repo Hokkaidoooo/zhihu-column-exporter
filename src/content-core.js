@@ -1,4 +1,4 @@
-import { canonicalSectionUrl, parsePaidColumnUrl, uniqueBy, exactNumericId, parseExactJsonNumbers } from "./shared.js";
+import { canonicalSectionUrl, parsePaidColumnUrl, uniqueBy } from "./shared.js";
 
 const TITLE_SELECTORS = [
   "h1",
@@ -68,16 +68,17 @@ export function inferPaidColumnInfo(document, pageUrl) {
   const direct = parsePaidColumnUrl(pageUrl);
   if (direct?.columnId) return direct;
 
-  for (const element of document.querySelectorAll('link[rel="canonical"][href],meta[property="og:url"][content],a[href]')) {
+  const candidateUrls = [];
+  document.querySelectorAll('link[rel="canonical"][href],meta[property="og:url"][content],a[href]').forEach((element) => {
     const value = element.getAttribute("href") || element.getAttribute("content");
-    if (!value) continue;
-    let candidate;
+    if (!value) return;
     try {
-      candidate = new URL(value, pageUrl).href;
+      candidateUrls.push(new URL(value, pageUrl).href);
     } catch {
       // Ignore malformed page-owned URLs.
-      continue;
     }
+  });
+  for (const candidate of candidateUrls) {
     const parsed = parsePaidColumnUrl(candidate);
     if (!parsed) continue;
     if (direct?.sectionId && parsed.columnId) {
@@ -126,9 +127,9 @@ function sectionFromDataset(element) {
   const raw = element.getAttribute("data-za-extra-module") || element.dataset?.zaExtraModule;
   if (!raw) return null;
   try {
-    const data = parseExactJsonNumbers(raw);
+    const data = JSON.parse(raw);
     const id = data?.card?.content?.id ?? data?.content?.id ?? data?.section?.id;
-    return exactNumericId(id);
+    return /^\d+$/.test(String(id || "")) ? String(id) : null;
   } catch {
     return null;
   }
@@ -205,13 +206,17 @@ function scoreContent(element) {
 }
 
 export function selectContentRoot(document) {
-  let best = null;
-  let bestScore = -1;
-  for (const element of document.querySelectorAll(CONTENT_SELECTORS.join(","))) {
-    const score = scoreContent(element);
-    if (score > bestScore) { best = element; bestScore = score; }
+  const candidates = [];
+  const seen = new Set();
+  for (const selector of CONTENT_SELECTORS) {
+    for (const element of document.querySelectorAll(selector)) {
+      if (seen.has(element)) continue;
+      seen.add(element);
+      candidates.push({ element, score: scoreContent(element) });
+    }
   }
-  return best;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]?.score >= 0 ? candidates[0].element : null;
 }
 
 function bestImageSource(image, pageUrl) {
@@ -246,7 +251,7 @@ function absolutizeLink(anchor, pageUrl) {
 function stripAttributes(root) {
   for (const element of [root, ...root.querySelectorAll("*")]) {
     for (const attribute of [...element.attributes]) {
-      const keep = ["href", "src", "alt", "title", "id", "colspan", "rowspan"].includes(attribute.name);
+      const keep = ["href", "src", "alt", "title", "colspan", "rowspan"].includes(attribute.name);
       if (!keep) element.removeAttribute(attribute.name);
     }
   }
@@ -319,17 +324,19 @@ export function probeArticleDocument(document, pageUrl) {
   // using exactly the extractor's condition: otherwise the cheap fingerprint
   // could settle on the teaser before Zhihu swaps in the purchased body.
   const bodyText = cleanText(document.body?.textContent);
-  const text = cleanText(root.textContent);
-  const textLength = text.length;
+  const textLength = cleanText(root.textContent).length;
   if (ACCESS_LOCK_PATTERN.test(bodyText) && (hasLockControl(document) || textLength < 2000)) {
     return { ok: false };
   }
 
   // Only cheap DOM signals: enough to notice the paid body still growing or
   // lazy image sources still resolving, without running the full conversion.
+  let imageSignature = 0;
   const images = root.querySelectorAll("img");
-  const imageSources = [...images].map((image) => bestImageSource(image, pageUrl) || "");
-  const formulas = [...root.querySelectorAll("[data-tex]")].map((element) => element.getAttribute("data-tex"));
+  for (const image of images) {
+    const source = bestImageSource(image, pageUrl);
+    imageSignature += source ? source.length : 1;
+  }
   return {
     ok: true,
     sectionId: pageInfo.sectionId,
@@ -338,20 +345,9 @@ export function probeArticleDocument(document, pageUrl) {
       textLength,
       root.querySelectorAll("p").length,
       images.length,
-      fingerprintText(JSON.stringify([text, imageSources, formulas]))
+      imageSignature
     ].join(":")
   };
-}
-
-function fingerprintText(text) {
-  let first = 2166136261;
-  let second = 5381;
-  for (let index = 0; index < text.length; index += 1) {
-    const code = text.charCodeAt(index);
-    first = Math.imul(first ^ code, 16777619);
-    second = Math.imul(second, 33) ^ code;
-  }
-  return `${first >>> 0}-${second >>> 0}`;
 }
 
 export function extractArticleDocument(document, pageUrl, toMarkdown) {

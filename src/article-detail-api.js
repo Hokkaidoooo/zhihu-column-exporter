@@ -4,8 +4,6 @@ import {
   sourceFromArticleItem
 } from "./article-api.js";
 import { canonicalSectionUrl } from "./shared.js";
-import { requestResource, httpError } from "./request.js";
-import { throwIfAborted } from "./cancellation.js";
 
 const API_ORIGINS = new Set(["https://www.zhihu.com", "https://zhuanlan.zhihu.com"]);
 const ACCESS_LOCK_PATTERN = /(订阅后.{0,8}(阅读|解锁)|购买后.{0,8}阅读|立即订阅|登录后.{0,8}(查看|阅读)|试看已结束)/;
@@ -64,37 +62,55 @@ export function normalizeArticleDetailPayload(payload, columnId, requestedSectio
   return normalizeColumnArticleItem(safeItem, columnId);
 }
 
-export async function fetchArticleDetail({ sectionId, columnId, apiOrigin, credentials = "include", request = fetch, signal }) {
+export async function fetchArticleDetail({
+  sectionId,
+  columnId,
+  apiOrigin,
+  credentials = "include",
+  request = fetch
+}) {
+  let response;
   try {
-    return await requestResource(articleDetailApiUrl(sectionId, apiOrigin), {
-      request,
-      signal,
+    response = await request(articleDetailApiUrl(sectionId, apiOrigin), {
       credentials,
       cache: "no-store",
-      headers: { Accept: "application/json" },
-      read: async (response) => {
-        if (!response.ok) throw httpError(response);
-        const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase();
-        if (!contentType.includes("application/json")) throw new Error("文章接口没有返回 JSON");
-        let payload;
-        try { payload = await response.json(); }
-        catch (error) {
-          if (error.name !== "SyntaxError") throw error;
-          throw new Error(`文章接口 JSON 无法解析：${error.message}`);
-        }
-        return normalizeArticleDetailPayload(payload, columnId, sectionId);
-      }
+      headers: { Accept: "application/json" }
     });
   } catch (error) {
-    throwIfAborted(signal);
+    return { ok: false, sectionId, retryable: true, reason: error?.message || String(error) };
+  }
+
+  if (response.status === 401 || response.status === 403) {
     return {
       ok: false,
       sectionId,
-      status: error.status,
-      accessDenied: error.status === 401 || error.status === 403,
-      retryable: error.retryable === true,
-      retryAfterMs: error.retryAfterMs,
-      reason: error.message || String(error)
+      accessDenied: true,
+      status: response.status,
+      reason: `文章接口返回 HTTP ${response.status}`
     };
   }
+  if (response.status === 429 || response.status >= 500) {
+    return {
+      ok: false,
+      sectionId,
+      retryable: true,
+      status: response.status,
+      reason: `文章接口返回 HTTP ${response.status}`
+    };
+  }
+  if (!response.ok) {
+    return { ok: false, sectionId, status: response.status, reason: `文章接口返回 HTTP ${response.status}` };
+  }
+
+  const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase();
+  if (!contentType.includes("application/json")) {
+    return { ok: false, sectionId, reason: "文章接口没有返回 JSON" };
+  }
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    return { ok: false, sectionId, reason: "文章接口 JSON 无法解析" };
+  }
+  return normalizeArticleDetailPayload(payload, columnId, sectionId);
 }

@@ -2,25 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mapWithConcurrency } from "../src/concurrency.js";
 
-test("失败后停止领取新任务，并等已启动任务收尾再报错", async () => {
-  const started = [];
-  let release;
-  let finished = false;
-  const hold = new Promise((resolve) => { release = resolve; });
-  const operation = mapWithConcurrency([1, 2, 3, 4], 2, async (value) => {
-    started.push(value);
-    if (value === 1) throw new Error("synthetic failure");
-    await hold;
-    finished = true;
-  });
-  const failure = assert.rejects(operation, /synthetic failure/);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(started, [1, 2]);
-  release();
-  await failure;
-  assert.equal(finished, true);
-});
-
 test("并发处理保持输入顺序且不超过上限", async () => {
   let active = 0;
   let maximum = 0;
