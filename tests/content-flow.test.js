@@ -76,3 +76,14 @@ test("目录 HTTP 404 不滚动重抓也不重试永久错误", async (t) => {
   assert.match(result.reason, /404/);
   assert.equal(calls, 1);
 });
+
+test("正文接口限流时不自动重试，权限探针也不继续切换域名", async (t) => {
+  let calls = 0;
+  const f = await fixture(t, async () => { calls++; return new Response("limited", { status: 429 }); });
+  const result = await f.send({ type: "EXTRACT_API_ARTICLE", columnId: "c_100", sectionId: "201" });
+  assert.equal(result.status, 429);
+  assert.equal(calls, 1);
+  const probe = await f.send({ type: "PROBE_ARTICLE_API", columnId: "c_100", sectionId: "201" });
+  assert.equal(probe.stopExport, true);
+  assert.equal(calls, 2);
+});

@@ -10,6 +10,7 @@ const downloadListeners = new Set();
 const downloads = new Map();
 const startedAt = performance.now();
 let peakTabs = 0;
+let lostTab = false;
 
 globalThis.chrome = {
   tabs: {
@@ -23,7 +24,12 @@ globalThis.chrome = {
       peakTabs = Math.max(peakTabs, tabs.size - 1);
       return { ...tab };
     },
-    update: async (id, update) => { Object.assign(tabs.get(id), update); return { ...tabs.get(id) }; },
+    update: async (id, update) => {
+      if (scenario === "closed-tab" && !lostTab) { tabs.delete(id); lostTab = true; }
+      if (!tabs.has(id)) throw new Error(`No tab with id: ${id}.`);
+      Object.assign(tabs.get(id), update);
+      return { ...tabs.get(id) };
+    },
     remove: async (id) => { tabs.delete(id); },
     sendMessage: async (id, message) => {
       if (message.type === "PING" || message.type === "CANCEL_OPERATION") return { ok: true };

@@ -1198,16 +1198,15 @@
   function inferPaidColumnInfo(document2, pageUrl) {
     const direct = parsePaidColumnUrl(pageUrl);
     if (direct?.columnId) return direct;
-    const candidateUrls = [];
-    document2.querySelectorAll('link[rel="canonical"][href],meta[property="og:url"][content],a[href]').forEach((element) => {
+    for (const element of document2.querySelectorAll('link[rel="canonical"][href],meta[property="og:url"][content],a[href]')) {
       const value = element.getAttribute("href") || element.getAttribute("content");
-      if (!value) return;
+      if (!value) continue;
+      let candidate;
       try {
-        candidateUrls.push(new URL(value, pageUrl).href);
+        candidate = new URL(value, pageUrl).href;
       } catch {
+        continue;
       }
-    });
-    for (const candidate of candidateUrls) {
       const parsed = parsePaidColumnUrl(candidate);
       if (!parsed) continue;
       if (direct?.sectionId && parsed.columnId) {
@@ -1314,12 +1313,16 @@
     return score;
   }
   function selectContentRoot(document2) {
-    const candidates = [];
+    let best = null;
+    let bestScore = -1;
     for (const element of document2.querySelectorAll(CONTENT_SELECTORS.join(","))) {
-      candidates.push({ element, score: scoreContent(element) });
+      const score = scoreContent(element);
+      if (score > bestScore) {
+        best = element;
+        bestScore = score;
+      }
     }
-    candidates.sort((a, b) => b.score - a.score);
-    return candidates[0]?.score >= 0 ? candidates[0].element : null;
+    return best;
   }
   function bestImageSource(image, pageUrl) {
     const source = image.getAttribute("data-original") || image.getAttribute("data-actualsrc") || image.getAttribute("data-src") || image.currentSrc || image.getAttribute("src");
@@ -1629,6 +1632,48 @@ $$` : `$${tex}$`;
     throw new Error(`\u76EE\u5F55\u8D85\u8FC7 ${maxPages} \u9875\uFF0C\u5DF2\u505C\u6B62\u4EE5\u907F\u514D\u65E0\u9650\u8BF7\u6C42`);
   }
 
+  // src/article-probe.js
+  var CACHE_ARTICLE_PROBES = true;
+  function createArticleProbe(document2, { enabled = CACHE_ARTICLE_PROBES, probe = probeArticleDocument } = {}) {
+    let cached = null;
+    let cachedUrl = "";
+    let sources = [];
+    let observer = null;
+    const invalidate = () => {
+      cached = null;
+      sources = [];
+    };
+    const observe = () => {
+      if (!enabled || observer) return;
+      observer = new document2.defaultView.MutationObserver(invalidate);
+      observer.observe(document2, { subtree: true, childList: true, characterData: true, attributes: true });
+    };
+    return {
+      read(pageUrl) {
+        if (!enabled) return probe(document2, pageUrl);
+        observe();
+        if (observer.takeRecords().length || cachedUrl !== pageUrl || sources.some(({ image, src }) => image.currentSrc !== src)) invalidate();
+        if (!cached) {
+          cached = probe(document2, pageUrl);
+          cachedUrl = pageUrl;
+          sources = Array.from(document2.images, (image) => ({ image, src: image.currentSrc }));
+        }
+        return cached;
+      },
+      release() {
+        observer?.disconnect();
+        observer = null;
+        invalidate();
+      }
+    };
+  }
+
+  // src/site-access.js
+  var PAUSE_ON_ACCESS_RESTRICTION = true;
+  function restrictedHttpStatus(status) {
+    return PAUSE_ON_ACCESS_RESTRICTION && [401, 403, 429].includes(Number(status));
+  }
+
   // src/retry.js
   async function retryOperation(operation, options = {}) {
     const {
@@ -1778,21 +1823,25 @@ $$` : `$${tex}$`;
   }
   async function extractPage(message = {}, signal) {
     const extract = () => extractArticleDocument(document, location.href, (root2) => turndown.turndown(root2));
-    if (message.settled === true) {
-      if (message.fingerprint !== probeArticleDocument(document, location.href).fingerprint) {
-        return { ok: false, reason: "\u6B63\u6587\u5728\u7A33\u5B9A\u6821\u9A8C\u540E\u53D1\u751F\u53D8\u5316\uFF0C\u8BF7\u91CD\u8BD5" };
+    try {
+      if (message.settled === true) {
+        if (message.fingerprint !== articleProbe.read(location.href).fingerprint) {
+          return { ok: false, reason: "\u6B63\u6587\u5728\u7A33\u5B9A\u6821\u9A8C\u540E\u53D1\u751F\u53D8\u5316\uFF0C\u8BF7\u91CD\u8BD5" };
+        }
+        return extract();
       }
-      return extract();
+      return await waitForArticleExtraction({
+        probe: () => articleProbe.read(location.href),
+        extract,
+        wait: (milliseconds) => delay(milliseconds, signal),
+        emptyLimit: 12
+      });
+    } finally {
+      articleProbe.release();
     }
-    return waitForArticleExtraction({
-      probe: () => probeArticleDocument(document, location.href),
-      extract,
-      wait: (milliseconds) => delay(milliseconds, signal),
-      emptyLimit: 12
-    });
   }
   function probePage() {
-    const probe = probeArticleDocument(document, location.href);
+    const probe = articleProbe.read(location.href);
     return {
       ok: true,
       sectionId: probe.ok ? probe.sectionId : "",
@@ -1821,7 +1870,7 @@ $$` : `$${tex}$`;
           throw error;
         }
         return result;
-      }, { attempts: 2, delays: [700], signal });
+      }, { attempts: 2, delays: [700], signal, shouldRetry: (error) => !restrictedHttpStatus(error.articleResult?.status) });
     } catch (error) {
       throwIfAborted(signal);
       return error?.articleResult || lastResult || {
@@ -1863,6 +1912,9 @@ $$` : `$${tex}$`;
         signal,
         credentials: "omit"
       });
+      if (anonymous.status === 429 && restrictedHttpStatus(anonymous.status)) {
+        return { ok: false, status: anonymous.status, stopExport: true, reason: anonymous.reason };
+      }
       if (anonymous.retryable) {
         noteFailure(apiOrigin, { reason: anonymous.reason });
         continue;
@@ -1872,6 +1924,9 @@ $$` : `$${tex}$`;
         continue;
       }
       const authenticated = await authenticatedArticleDetail(sectionId, columnId, apiOrigin, signal);
+      if (restrictedHttpStatus(authenticated.status)) {
+        return { ...authenticated, stopExport: true };
+      }
       if (!authenticated.ok) {
         noteFailure(apiOrigin, authenticated);
         continue;
@@ -1903,6 +1958,7 @@ $$` : `$${tex}$`;
     return extractApiArticleById(sectionId, columnId, apiOrigin, signal);
   }
   var operations = /* @__PURE__ */ new Map();
+  var articleProbe;
   async function runOperation(message) {
     if (!message.taskId) throw new Error("\u5BFC\u51FA\u8BF7\u6C42\u7F3A\u5C11\u4EFB\u52A1\u8EAB\u4EFD\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u5BFC\u51FA\u9875");
     const controller = new AbortController();
@@ -1921,8 +1977,11 @@ $$` : `$${tex}$`;
   }
   if (!globalThis.__zhihuExporterInstalled) {
     globalThis.__zhihuExporterInstalled = true;
+    articleProbe = createArticleProbe(document);
+    addEventListener("pagehide", () => articleProbe.release());
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type === "CANCEL_OPERATION") {
+        articleProbe.release();
         for (const controller of operations.get(message.taskId) || []) controller.abort(abortError());
         sendResponse({ ok: true });
         return false;

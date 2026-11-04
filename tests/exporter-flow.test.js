@@ -72,6 +72,10 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
   let finishDownloads = true;
   let fetchHandler = null;
   let apiHandler = null;
+  let tabHook = async () => {};
+  let createdTabs = 0;
+  let peakTabs = 0;
+  const missingTabCalls = [];
   const apiCalls = [];
   const extractCalls = [];
   const fetchCalls = [];
@@ -127,7 +131,10 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
 
   function tabById(id) {
     const tab = tabs.get(id);
-    if (!tab) throw new Error(`Synthetic tab ${id} is closed`);
+    if (!tab) {
+      missingTabCalls.push(id);
+      throw new Error(`No tab with id: ${id}.`);
+    }
     return tab;
   }
 
@@ -147,6 +154,7 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
   }
 
   async function sendMessage(id, message) {
+    await tabHook({ type: message.type, id });
     const tab = tabById(id);
     if (message.type === "CANCEL_OPERATION") return { ok: true };
     if (message.type === "DISCOVER_COLUMN") {
@@ -177,11 +185,16 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
     tabs: {
       get: async (id) => ({ ...tabById(id) }),
       create: async ({ url }) => {
+        await tabHook({ type: "before-create", id: nextTabId });
         const tab = { id: nextTabId++, url, status: "complete" };
         tabs.set(tab.id, tab);
+        createdTabs += 1;
+        peakTabs = Math.max(peakTabs, tabs.size - 1);
+        await tabHook({ type: "created", id: tab.id });
         return { ...tab };
       },
       update: async (id, update) => {
+        await tabHook({ type: "update", id, url: update.url });
         const tab = tabById(id);
         Object.assign(tab, update);
         return { ...tab };
@@ -228,6 +241,9 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
     links, downloads, extractCalls, fetchCalls, createdBlobs, errors, element, apiCalls,
     setFetch(fn) { fetchHandler = fn; },
     setApi(fn) { apiHandler = fn; },
+    setTabHook(fn) { tabHook = fn; },
+    loseTab(id) { tabs.delete(id); },
+    tabStats() { return { created: createdTabs, peak: peakTabs, missing: [...missingTabCalls] }; },
     setAutoFinishDownloads(value) { finishDownloads = value; },
     completeDownload,
     downloadListenerCount() { return downloadListeners.size; },
@@ -246,6 +262,84 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
 function archiveInfo(download) {
   return JSON.parse(fflate.strFromU8(download.files["export-info.json"]));
 }
+
+for (const lossStage of ["update", "PROBE_ARTICLE", "EXTRACT_ARTICLE"]) {
+  test(`工作标签页在 ${lossStage} 消失后重建并完整导出，后续文章不复用失效 ID`, async (t) => {
+    const f = await createFixture(t, { count: 16 });
+    let lost = null;
+    f.setTabHook(({ type, id }) => {
+      if (type === lossStage && lost === null) {
+        lost = id;
+        f.loseTab(id);
+      }
+    });
+    await f.act("start-button");
+    const info = archiveInfo(f.downloads[0]);
+    assert.equal(info.complete, true);
+    assert.equal(info.articleCount, f.links.length);
+    assert.deepEqual([...f.extractCalls].sort(), f.links.map((link) => link.sectionId).sort());
+    assert.equal(f.tabStats().created, 5);
+    assert.equal(f.tabStats().missing.filter((id) => id === lost).length, 1);
+    assert.equal(f.tabStats().peak, 4);
+    assert.equal(f.temporaryTabCount(), 0);
+    assert.match(f.element("activity-log").textContent, /标签页.*重新创建/);
+  });
+}
+
+test("重建标签页失败时停止领取新文章，保存已完成正文及全部未完成清单", async (t) => {
+  const f = await createFixture(t, { count: 40 });
+  let lost = false;
+  f.setTabHook(({ type, id, url }) => {
+    if (type === "update" && url.endsWith("/205") && !lost) {
+      lost = true;
+      f.loseTab(id);
+    }
+    if (type === "before-create" && lost) throw new Error("Synthetic tab creation denied");
+  });
+  await f.act("start-button");
+  const info = archiveInfo(f.downloads[0]);
+  assert.equal(lost, true);
+  assert.equal(info.complete, false);
+  assert.ok(info.articleCount > 0 && info.articleCount < 12);
+  assert.equal(info.articleCount + info.failureCount, f.links.length);
+  assert.match(f.element("error-message").textContent, /无法创建.*标签页/);
+  assert.equal(f.tabStats().created, 4);
+  assert.equal(f.temporaryTabCount(), 0);
+});
+
+test("标签页反复消失时有恢复次数上限，不逐篇耗尽整份目录", async (t) => {
+  const f = await createFixture(t, { count: 40 });
+  f.setTabHook(({ type, id }) => { if (type === "update") f.loseTab(id); });
+  await f.act("start-button");
+  assert.equal(f.downloads.length, 0);
+  assert.ok(f.tabStats().created <= 12);
+  assert.match(f.element("error-message").textContent, /标签页.*反复关闭/);
+  assert.equal(f.temporaryTabCount(), 0);
+});
+
+test("重建返回前点击停止会关闭晚到的新标签页，保留部分结果且不恢复执行", async (t) => {
+  const f = await createFixture(t, { count: 40 });
+  let lost = false;
+  let stopped = false;
+  f.setTabHook(({ type, id, url }) => {
+    if (type === "update" && url.endsWith("/205") && !lost) {
+      lost = true;
+      f.loseTab(id);
+    }
+    if (type === "created" && lost) {
+      stopped = true;
+      f.element("stop-button").click();
+    }
+  });
+  await f.act("start-button");
+  assert.equal(stopped, true);
+  const info = archiveInfo(f.downloads[0]);
+  assert.equal(info.complete, false);
+  assert.ok(info.articleCount >= 1);
+  assert.equal(info.articleCount + info.failureCount, f.links.length);
+  assert.equal(f.tabStats().created, 5);
+  assert.equal(f.temporaryTabCount(), 0);
+});
 
 test("单篇接口失败明确转正常页面，其他接口成功文章无需重读", async (t) => {
   const fixture = await createFixture(t, { count: 8, api: true });
@@ -473,4 +567,28 @@ test("API 校验文章复用，后续单篇任务连续调度且最多四路", a
   assert.ok(!f.apiCalls.includes("201"));
   assert.equal(f.apiCalls.length, 8);
   assert.ok(peak <= 4);
+});
+
+for (const status of [401, 403, 429]) {
+  test(`正文接口 HTTP ${status} 停止领取新任务并保存部分结果，不换页面继续抓取`, async (t) => {
+    const f = await createFixture(t, { count: 40, api: true, images: true });
+    f.setApi(() => ({ ok: false, status, accessDenied: status !== 429, reason: `HTTP ${status}` }));
+    await f.act("start-button");
+    const info = archiveInfo(f.downloads[0]);
+    assert.equal(info.complete, false);
+    assert.equal(info.articleCount, 1);
+    assert.equal(info.failureCount, 39);
+    assert.ok(f.apiCalls.length <= 4);
+    assert.equal(f.fetchCalls.length, 0);
+    assert.deepEqual(f.extractCalls, ["201"]);
+    assert.match(f.element("source-method").textContent, /限制了当前访问/);
+    assert.equal(f.temporaryTabCount(), 0);
+  });
+}
+
+test("逐篇读取原因不会被最近结果四十条上限挤掉", async (t) => {
+  const f = await createFixture(t, { count: 45 });
+  await f.act("start-button");
+  assert.equal(f.element("activity-log").children.length, 40);
+  assert.match(f.element("source-method").textContent, /当前来源页没有可用的正文接口/);
 });

@@ -117,14 +117,30 @@ test("等待目标文章 URL 超时后报告未匹配而不是抛错", async () 
   const tab = await waitForExpectedTabUrl({
     tabId: 1,
     expectedPage,
-    getTab: async () => ({ status: "complete", url: "https://www.zhihu.com/signin" }),
+    getTab: async () => ({ status: "complete", url: "https://www.zhihu.com/unavailable" }),
     wait: async (milliseconds) => { time += milliseconds; },
     now: () => time,
     timeoutMs: 300,
     pollMs: 100
   });
   assert.equal(tab.matched, false);
-  assert.equal(tab.url, "https://www.zhihu.com/signin");
+  assert.equal(tab.url, "https://www.zhihu.com/unavailable");
+});
+
+test("跳转到登录或安全验证页时立即报告限制，不继续轮询", async () => {
+  for (const route of ["signin", "account/unhuman", "captcha", "challenge"]) {
+    await assert.rejects(waitForStableTab({
+      tabId: 1,
+      getTab: async () => ({ url: `https://www.zhihu.com/${route}` }),
+      wait: async () => { throw new Error("不应继续等待"); }
+    }), /登录或安全验证/);
+    await assert.rejects(waitForExpectedTabUrl({
+      tabId: 1,
+      expectedPage: expectedPageFromUrl("https://zhuanlan.zhihu.com/p/100"),
+      getTab: async () => ({ url: `https://www.zhihu.com/${route}` }),
+      wait: async () => { throw new Error("不应继续等待"); }
+    }), /登录或安全验证/);
+  }
 });
 
 test("错误文章 URL 会恢复为目标 URL 后再继续", async () => {

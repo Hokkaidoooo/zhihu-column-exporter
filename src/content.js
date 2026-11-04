@@ -6,7 +6,9 @@ import { extractColumnArticleItem } from "./cached-article.js";
 import { fetchAllColumnArticles } from "./catalog-api.js";
 import { delay, abortError, throwIfAborted } from "./cancellation.js";
 import { requestResource, httpError } from "./request.js";
-import { detectPageTitle, extractArticleDocument, extractColumnLinks, inferPaidColumnInfo, probeArticleDocument } from "./content-core.js";
+import { detectPageTitle, extractArticleDocument, extractColumnLinks, inferPaidColumnInfo } from "./content-core.js";
+import { createArticleProbe } from "./article-probe.js";
+import { restrictedHttpStatus } from "./site-access.js";
 import { retryOperation } from "./retry.js";
 
 
@@ -150,22 +152,24 @@ async function extractPage(message = {}, signal) {
   // The export page polls PROBE_ARTICLE on its own unthrottled clock and only
   // then asks for the conversion; a hidden tab's timers run at ~1 tick/second,
   // so waiting in here would cost seconds per article.
-  if (message.settled === true) {
-    if (message.fingerprint !== probeArticleDocument(document, location.href).fingerprint) {
-      return { ok: false, reason: "正文在稳定校验后发生变化，请重试" };
+  try {
+    if (message.settled === true) {
+      if (message.fingerprint !== articleProbe.read(location.href).fingerprint) {
+        return { ok: false, reason: "正文在稳定校验后发生变化，请重试" };
+      }
+      return extract();
     }
-    return extract();
-  }
-  return waitForArticleExtraction({
-    probe: () => probeArticleDocument(document, location.href),
-    extract,
-    wait: (milliseconds) => delay(milliseconds, signal),
-    emptyLimit: 12
-  });
+    return await waitForArticleExtraction({
+      probe: () => articleProbe.read(location.href),
+      extract,
+      wait: (milliseconds) => delay(milliseconds, signal),
+      emptyLimit: 12
+    });
+  } finally { articleProbe.release(); }
 }
 
 function probePage() {
-  const probe = probeArticleDocument(document, location.href);
+  const probe = articleProbe.read(location.href);
   return {
     ok: true,
     sectionId: probe.ok ? probe.sectionId : "",
@@ -196,7 +200,7 @@ async function authenticatedArticleDetail(sectionId, columnId, apiOrigin = locat
         throw error;
       }
       return result;
-    }, { attempts: 2, delays: [700], signal });
+    }, { attempts: 2, delays: [700], signal, shouldRetry: (error) => !restrictedHttpStatus(error.articleResult?.status) });
   } catch (error) {
     throwIfAborted(signal);
     return error?.articleResult || lastResult || {
@@ -243,6 +247,9 @@ async function probeArticleApi(message, signal) {
       signal,
       credentials: "omit"
     });
+    if (anonymous.status === 429 && restrictedHttpStatus(anonymous.status)) {
+      return { ok: false, status: anonymous.status, stopExport: true, reason: anonymous.reason };
+    }
     if (anonymous.retryable) {
       noteFailure(apiOrigin, { reason: anonymous.reason });
       continue;
@@ -253,6 +260,9 @@ async function probeArticleApi(message, signal) {
     }
 
     const authenticated = await authenticatedArticleDetail(sectionId, columnId, apiOrigin, signal);
+    if (restrictedHttpStatus(authenticated.status)) {
+      return { ...authenticated, stopExport: true };
+    }
     if (!authenticated.ok) {
       noteFailure(apiOrigin, authenticated);
       continue;
@@ -286,6 +296,7 @@ async function extractApiArticleRequest(message, signal) {
 }
 
 const operations = new Map();
+let articleProbe;
 
 async function runOperation(message) {
   if (!message.taskId) throw new Error("导出请求缺少任务身份，请重新打开导出页");
@@ -308,8 +319,11 @@ async function runOperation(message) {
 // Keep a single listener and a single cancellation registry per document.
 if (!globalThis.__zhihuExporterInstalled) {
   globalThis.__zhihuExporterInstalled = true;
+  articleProbe = createArticleProbe(document);
+  addEventListener("pagehide", () => articleProbe.release());
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "CANCEL_OPERATION") {
+      articleProbe.release();
       for (const controller of operations.get(message.taskId) || []) controller.abort(abortError());
       sendResponse({ ok: true });
       return false;

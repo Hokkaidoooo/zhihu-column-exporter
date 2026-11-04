@@ -159,6 +159,9 @@ progress {
 progress::-webkit-progress-bar { background: #dfe4e0; }
 progress::-webkit-progress-value { background: #258153; transition: width 180ms ease; }
 
+.source-method { margin: 0; color: #65736b; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.source-method:empty { display: none; }
+
 .error-message {
   padding: 13px 15px;
   border-left: 3px solid #b7433d;

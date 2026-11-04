@@ -2025,7 +2025,90 @@
     return result;
   }
 
+  // src/site-access.js
+  var PAUSE_ON_ACCESS_RESTRICTION = true;
+  function restrictedHttpStatus(status) {
+    return PAUSE_ON_ACCESS_RESTRICTION && [401, 403, 429].includes(Number(status));
+  }
+  function assertPageAccess(pageUrl) {
+    if (!PAUSE_ON_ACCESS_RESTRICTION || !pageUrl) return;
+    const path = new URL(pageUrl).pathname;
+    if (/^\/(?:account\/unhuman|captcha|challenge|signin)(?:\/|$)/i.test(path)) {
+      throw new SiteAccessRestrictionError("\u77E5\u4E4E\u8981\u6C42\u767B\u5F55\u6216\u5B89\u5168\u9A8C\u8BC1\uFF0C\u8BF7\u5148\u5728\u539F\u9875\u9762\u5904\u7406");
+    }
+  }
+  var SiteAccessRestrictionError = class extends Error {
+    constructor(reason) {
+      super(`\u77E5\u4E4E\u9650\u5236\u4E86\u5F53\u524D\u8BBF\u95EE\uFF0C\u5DF2\u505C\u6B62\u81EA\u52A8\u8BFB\u53D6\uFF1A${reason}`);
+      this.name = "SiteAccessRestrictionError";
+    }
+  };
+
   // src/tab-lifecycle.js
+  var PAGE_TAB_RECOVERY_LIMIT = 2;
+  var PageTabUnavailableError = class extends Error {
+    constructor(message, cause) {
+      super(message, { cause });
+      this.name = "PageTabUnavailableError";
+    }
+  };
+  function isMissingTabError(error, tabId) {
+    const match = String(error?.message || error).match(/No tab with id:\s*(\d+)\.?/i);
+    return Boolean(match && Number(match[1]) === tabId);
+  }
+  async function createRecoverablePageTab({ openTab, closeTab, signal, onRecovered, recoveryLimit = PAGE_TAB_RECOVERY_LIMIT }) {
+    if (!Number.isInteger(recoveryLimit) || recoveryLimit < 0) throw new TypeError("\u6807\u7B7E\u9875\u6062\u590D\u6B21\u6570\u5FC5\u987B\u662F\u975E\u8D1F\u6574\u6570");
+    let tabId = null;
+    let recoveries = 0;
+    const open = async () => {
+      throwIfAborted(signal);
+      let createdId;
+      try {
+        createdId = await openTab();
+      } catch (error) {
+        throwIfAborted(signal);
+        throw new PageTabUnavailableError(`\u65E0\u6CD5\u521B\u5EFA\u6B63\u6587\u8BFB\u53D6\u6807\u7B7E\u9875\uFF1A${error.message || error}`, error);
+      }
+      tabId = createdId;
+      if (signal?.aborted) {
+        await closeTab(tabId);
+        tabId = null;
+        throwIfAborted(signal);
+      }
+    };
+    await open();
+    return {
+      async read(operation) {
+        for (; ; ) {
+          throwIfAborted(signal);
+          try {
+            return await operation(tabId);
+          } catch (error) {
+            throwIfAborted(signal);
+            if (!isMissingTabError(error, tabId)) throw error;
+            const previousId = tabId;
+            try {
+              await closeTab(previousId);
+            } catch (closeError) {
+              throw new PageTabUnavailableError(`\u65E0\u6CD5\u6E05\u7406\u5931\u6548\u7684\u6B63\u6587\u6807\u7B7E\u9875\uFF1A${closeError.message || closeError}`, closeError);
+            }
+            tabId = null;
+            if (recoveries >= recoveryLimit) {
+              throw new PageTabUnavailableError("\u6B63\u6587\u8BFB\u53D6\u6807\u7B7E\u9875\u53CD\u590D\u5173\u95ED\uFF0C\u5DF2\u505C\u6B62\u7EE7\u7EED\u8BFB\u53D6\u5E76\u4FDD\u5B58\u5DF2\u5B8C\u6210\u5185\u5BB9", error);
+            }
+            recoveries += 1;
+            await open();
+            onRecovered({ previousId, tabId, recoveries });
+          }
+        }
+      },
+      async close() {
+        if (tabId === null) return;
+        await closeTab(tabId);
+        tabId = null;
+      }
+    };
+  }
   async function waitForStableTab({
     tabId,
     getTab,
@@ -2042,6 +2125,7 @@
     while (now() < deadline) {
       const tab = await getTab(tabId);
       const currentUrl = tab.url || "";
+      assertPageAccess(currentUrl);
       const loaded = requireComplete ? tab.status === "complete" : Boolean(currentUrl);
       if (loaded && currentUrl === previousUrl) {
         if (stableSince === null) stableSince = now();
@@ -2068,6 +2152,7 @@
     while (now() < deadline) {
       const tab = await getTab(tabId);
       lastUrl = tab.url || "";
+      assertPageAccess(lastUrl);
       if (lastUrl && pageMatchesExpectation(lastUrl, expectedPage)) return tab;
       await wait(pollMs);
     }
@@ -2100,6 +2185,7 @@
     sourceUrl: document.querySelector("#source-url"),
     stateLabel: document.querySelector("#state-label"),
     currentItem: document.querySelector("#current-item"),
+    sourceMethod: document.querySelector("#source-method"),
     progress: document.querySelector("#progress"),
     foundCount: document.querySelector("#found-count"),
     savedCount: document.querySelector("#saved-count"),
@@ -2394,8 +2480,8 @@
       session.columnId
     );
   }
-  async function extractOneArticle(tabId, link) {
-    return retryOperation(async () => {
+  async function extractOneArticle(worker, link) {
+    return retryOperation(() => worker.read(async (tabId) => {
       if (session.cancelled) throw new Error("\u5BFC\u51FA\u5DF2\u505C\u6B62");
       const expectedPage = await navigateToArticle(tabId, link);
       const result = await extractSettledArticle(tabId, link, expectedPage);
@@ -2403,10 +2489,10 @@
         throw new Error(result?.reason || "\u6B63\u6587\u63D0\u53D6\u5931\u8D25");
       }
       return result;
-    }, {
+    }), {
       attempts: 3,
       signal: session.controller?.signal,
-      shouldRetry: () => !session.cancelled,
+      shouldRetry: (error) => !session.cancelled && !(error instanceof PageTabUnavailableError) && !(error instanceof SiteAccessRestrictionError),
       onRetry: ({ error, nextAttempt }) => {
         addLog(`${link.title}\uFF1A${error.message}\uFF0C\u6B63\u5728\u81EA\u52A8\u91CD\u8BD5 ${nextAttempt} / 3`, "neutral");
       }
@@ -2429,7 +2515,7 @@
       if (next) claimedIds.add(next.sectionId);
       return next;
     };
-    const runWorker = async (tabId) => {
+    const runWorker = async (worker) => {
       for (let link = takeNext(); link; link = takeNext()) {
         if (session.cancelled || stopReason) return;
         const position = session.completedIds.size + 1;
@@ -2437,7 +2523,7 @@
         const eta = remainingTimeText(Date.now() - startedAt, processed, scope().length);
         setState("\u6B63\u5728\u9010\u7BC7\u63D0\u53D6\u6B63\u6587", `${position} / ${total} \xB7 ${link.title}${eta ? ` \xB7 ${eta}` : ""}`);
         try {
-          const article = await extractOneArticle(tabId, link);
+          const article = await extractOneArticle(worker, link);
           if (!article?.ok) {
             recordFailure(link, article?.reason || "\u6B63\u6587\u63D0\u53D6\u5931\u8D25", Boolean(article?.accessDenied));
             consecutiveFailures += 1;
@@ -2452,6 +2538,10 @@
           }
         } catch (error) {
           if (session.cancelled) return;
+          if (error instanceof PageTabUnavailableError || error instanceof SiteAccessRestrictionError) {
+            stopReason = error;
+            return;
+          }
           if (/当前 Chrome 会话没有显示完整正文/.test(error.message || "")) {
             stopReason = error;
             return;
@@ -2467,17 +2557,25 @@
         }
       }
     };
-    const tabs = [];
+    const workers = [];
     try {
       for (let index = 0; index < tabCount; index += 1) {
         if (session.cancelled) break;
-        const tab = await chrome.tabs.create({ url: "about:blank", active: false });
-        activeTempTabIds.add(tab.id);
-        tabs.push(tab.id);
+        const worker = await createRecoverablePageTab({
+          openTab: async () => {
+            const tab = await chrome.tabs.create({ url: "about:blank", active: false });
+            activeTempTabIds.add(tab.id);
+            return tab.id;
+          },
+          closeTab: closeTempTab,
+          signal: session.controller.signal,
+          onRecovered: () => addLog("\u6B63\u6587\u8BFB\u53D6\u6807\u7B7E\u9875\u5DF2\u5173\u95ED\uFF0C\u5DF2\u91CD\u65B0\u521B\u5EFA\u5E76\u91CD\u8BD5\u5F53\u524D\u6587\u7AE0", "neutral")
+        });
+        workers.push(worker);
       }
-      await Promise.all(tabs.map((tabId) => runWorker(tabId)));
+      await Promise.all(workers.map((worker) => runWorker(worker)));
     } finally {
-      await Promise.all(tabs.map((tabId) => closeTempTab(tabId)));
+      await Promise.all(workers.map((worker) => worker.close()));
     }
     if (stopReason) throw stopReason;
   }
@@ -2508,6 +2606,7 @@
         sectionId: probeLink.sectionId
       });
       if (!result?.ok) {
+        if (result?.stopExport) throw new SiteAccessRestrictionError(result.reason);
         const error = new Error(result?.reason || "\u767B\u5F55\u6001\u6587\u7AE0\u63A5\u53E3\u4E0D\u53EF\u7528");
         error.accessDenied = Boolean(result?.accessDenied);
         error.truncated = Boolean(result?.truncated);
@@ -2517,7 +2616,7 @@
     }, {
       attempts: 2,
       signal: session.controller?.signal,
-      shouldRetry: (error) => !session.cancelled && !error.accessDenied && !error.truncated,
+      shouldRetry: (error) => !session.cancelled && !(error instanceof SiteAccessRestrictionError) && !error.accessDenied && !error.truncated,
       onRetry: ({ error }) => addLog(`\u6587\u7AE0\u63A5\u53E3\u6821\u9A8C\u5931\u8D25\uFF1A${error.message}\uFF1B\u6B63\u5728\u91CD\u8BD5`, "neutral")
     });
     if (!probe.anonymousDenied) throw new Error("\u65E0\u6CD5\u8BC1\u660E\u6587\u7AE0\u63A5\u53E3\u53EA\u5411\u5F53\u524D\u767B\u5F55\u4F1A\u8BDD\u8FD4\u56DE\u6B63\u6587");
@@ -2539,7 +2638,7 @@
     }, {
       attempts: 2,
       signal: session.controller?.signal,
-      shouldRetry: (error) => !session.cancelled && !error.accessDenied
+      shouldRetry: (error) => !session.cancelled && !(error instanceof SiteAccessRestrictionError) && !error.accessDenied
     });
   }
   async function decideArticleSource(queue) {
@@ -2550,6 +2649,7 @@
     try {
       probe = await probeArticleApiAccess(probeLink);
     } catch (error) {
+      if (error instanceof SiteAccessRestrictionError) throw error;
       return planArticleSource({ probeFailure: error.message || String(error) });
     }
     let apiArticle = null;
@@ -2558,6 +2658,7 @@
       apiArticle = assertExpectedArticleResult(probe.article, probeLink.sectionId, session.columnId);
       pageArticle = await readProbePage(probeLink);
     } catch (error) {
+      if (error instanceof SiteAccessRestrictionError) throw error;
       return planArticleSource({ probeFailure: error.message || String(error) });
     }
     const plan = planArticleSource({ comparison: compareArticleApiWithPage(apiArticle, pageArticle) });
@@ -2569,6 +2670,7 @@
     if (session.articleSourceMode === "page") return processPageQueue(queue);
     if (session.articleSourceMode !== "api") {
       const plan = await decideArticleSource(queue);
+      ui.sourceMethod.textContent = plan.headline;
       addLog(plan.headline, plan.mode === "api" ? "success" : "neutral");
       if (plan.detail) addLog(plan.detail, "neutral");
       session.articleSourceMode = plan.mode;
@@ -2578,8 +2680,9 @@
     const pending = queue.filter((link) => !session.completedIds.has(link.sectionId));
     const pageFallback = [];
     let sourceFailure = null;
+    let restriction = null;
     await mapWithConcurrency(pending, 4, async (link) => {
-      if (session.cancelled) return;
+      if (session.cancelled || restriction) return;
       if (sourceFailure) {
         pageFallback.push(link);
         return;
@@ -2593,6 +2696,10 @@
           sectionId: link.sectionId
         });
         if (!article?.ok) {
+          if (restrictedHttpStatus(article?.status)) {
+            restriction = new SiteAccessRestrictionError(article.reason || `HTTP ${article.status}`);
+            return;
+          }
           addLog(`${link.title}\uFF1A${article?.reason || "\u6587\u7AE0\u63A5\u53E3\u6CA1\u6709\u8FD4\u56DE\u6B63\u6587"}\uFF0C\u5C06\u6539\u7528\u6B63\u5E38\u9875\u9762\u8BFB\u53D6`, "neutral");
           pageFallback.push(link);
           if (article?.status === 429 || article?.accessDenied) sourceFailure = article.reason;
@@ -2606,9 +2713,11 @@
         pageFallback.push(link);
       }
     });
+    if (restriction) throw restriction;
     if (session.cancelled || !pageFallback.length) return;
     if (sourceFailure) session.articleSourceMode = "page";
     addLog(`${pageFallback.length} \u7BC7\u63A5\u53E3\u6B63\u6587\u4E0D\u53EF\u7528\uFF0C\u6539\u7528\u9010\u7BC7\u9875\u9762\u63D0\u53D6${sourceFailure ? `\uFF1A${sourceFailure}` : ""}`, "neutral");
+    ui.sourceMethod.textContent = `\u90E8\u5206\u6587\u7AE0\u6539\u7528\u9010\u7BC7\u9875\u9762\u8BFB\u53D6${sourceFailure ? `\uFF1A${sourceFailure}` : ""}`;
     const fallbackIds = new Set(pageFallback.map((link) => link.sectionId));
     await processPageQueue(pending.filter((link) => fallbackIds.has(link.sectionId)), false);
   }
@@ -2616,6 +2725,7 @@
     if (session.articleApiTabId && /^c_\d+$/.test(String(session.columnId || ""))) {
       return processArticleApiQueue(queue);
     }
+    ui.sourceMethod.textContent = "\u9010\u7BC7\u8BFB\u53D6\u6B63\u6587\uFF1A\u5F53\u524D\u6765\u6E90\u9875\u6CA1\u6709\u53EF\u7528\u7684\u6B63\u6587\u63A5\u53E3";
     return processPageQueue(queue);
   }
   var readerCss = `
@@ -2790,6 +2900,10 @@ ${item.url}
       await processQueue(nextQueue());
     } catch (error) {
       processingError = error;
+      if (error instanceof SiteAccessRestrictionError) {
+        session.controller.abort(abortError("\u8BBF\u95EE\u53D7\u9650\uFF0C\u505C\u6B62\u65B0\u7684\u8BF7\u6C42"));
+        ui.sourceMethod.textContent = error.message;
+      }
       setError(error.message || String(error));
     }
     session.failures = collectUnexportedArticles({

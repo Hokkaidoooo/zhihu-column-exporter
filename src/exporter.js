@@ -39,7 +39,8 @@ import {
   shouldStopPageMode
 } from "./export-plan.js";
 import { assertExpectedArticleResult, expectedPageFromUrl, pageMatchesExpectation } from "./page-identity.js";
-import { ensureExpectedTabPage, waitForExpectedTabUrl, waitForStableTab } from "./tab-lifecycle.js";
+import { createRecoverablePageTab, PageTabUnavailableError, ensureExpectedTabPage, waitForExpectedTabUrl, waitForStableTab } from "./tab-lifecycle.js";
+import { restrictedHttpStatus, SiteAccessRestrictionError } from "./site-access.js";
 
 const PAGE_READY_ATTEMPTS = 200;
 const PAGE_READY_INTERVAL_MS = 100;
@@ -52,6 +53,7 @@ const ui = {
   sourceUrl: document.querySelector("#source-url"),
   stateLabel: document.querySelector("#state-label"),
   currentItem: document.querySelector("#current-item"),
+  sourceMethod: document.querySelector("#source-method"),
   progress: document.querySelector("#progress"),
   foundCount: document.querySelector("#found-count"),
   savedCount: document.querySelector("#saved-count"),
@@ -383,8 +385,8 @@ async function extractSettledArticle(tabId, link, expectedPage) {
   );
 }
 
-async function extractOneArticle(tabId, link) {
-  return retryOperation(async () => {
+async function extractOneArticle(worker, link) {
+  return retryOperation(() => worker.read(async (tabId) => {
     if (session.cancelled) throw new Error("导出已停止");
     const expectedPage = await navigateToArticle(tabId, link);
     const result = await extractSettledArticle(tabId, link, expectedPage);
@@ -392,10 +394,10 @@ async function extractOneArticle(tabId, link) {
       throw new Error(result?.reason || "正文提取失败");
     }
     return result;
-  }, {
+  }), {
     attempts: 3,
     signal: session.controller?.signal,
-    shouldRetry: () => !session.cancelled,
+    shouldRetry: (error) => !session.cancelled && !(error instanceof PageTabUnavailableError) && !(error instanceof SiteAccessRestrictionError),
     onRetry: ({ error, nextAttempt }) => {
       addLog(`${link.title}：${error.message}，正在自动重试 ${nextAttempt} / 3`, "neutral");
     }
@@ -423,7 +425,7 @@ async function processPageQueue(queue, includeDiscovered = true) {
     return next;
   };
 
-  const runWorker = async (tabId) => {
+  const runWorker = async (worker) => {
     for (let link = takeNext(); link; link = takeNext()) {
       if (session.cancelled || stopReason) return;
 
@@ -433,7 +435,7 @@ async function processPageQueue(queue, includeDiscovered = true) {
       setState("正在逐篇提取正文", `${position} / ${total} · ${link.title}${eta ? ` · ${eta}` : ""}`);
 
       try {
-        const article = await extractOneArticle(tabId, link);
+        const article = await extractOneArticle(worker, link);
         if (!article?.ok) {
           recordFailure(link, article?.reason || "正文提取失败", Boolean(article?.accessDenied));
           consecutiveFailures += 1;
@@ -448,6 +450,10 @@ async function processPageQueue(queue, includeDiscovered = true) {
         }
       } catch (error) {
         if (session.cancelled) return;
+        if (error instanceof PageTabUnavailableError || error instanceof SiteAccessRestrictionError) {
+          stopReason = error;
+          return;
+        }
         if (/当前 Chrome 会话没有显示完整正文/.test(error.message || "")) {
           stopReason = error;
           return;
@@ -464,17 +470,25 @@ async function processPageQueue(queue, includeDiscovered = true) {
     }
   };
 
-  const tabs = [];
+  const workers = [];
   try {
     for (let index = 0; index < tabCount; index += 1) {
       if (session.cancelled) break;
-      const tab = await chrome.tabs.create({ url: "about:blank", active: false });
-      activeTempTabIds.add(tab.id);
-      tabs.push(tab.id);
+      const worker = await createRecoverablePageTab({
+        openTab: async () => {
+          const tab = await chrome.tabs.create({ url: "about:blank", active: false });
+          activeTempTabIds.add(tab.id);
+          return tab.id;
+        },
+        closeTab: closeTempTab,
+        signal: session.controller.signal,
+        onRecovered: () => addLog("正文读取标签页已关闭，已重新创建并重试当前文章", "neutral")
+      });
+      workers.push(worker);
     }
-    await Promise.all(tabs.map((tabId) => runWorker(tabId)));
+    await Promise.all(workers.map((worker) => runWorker(worker)));
   } finally {
-    await Promise.all(tabs.map((tabId) => closeTempTab(tabId)));
+    await Promise.all(workers.map((worker) => worker.close()));
   }
   if (stopReason) throw stopReason;
 }
@@ -508,6 +522,7 @@ async function probeArticleApiAccess(probeLink) {
       sectionId: probeLink.sectionId
     });
     if (!result?.ok) {
+      if (result?.stopExport) throw new SiteAccessRestrictionError(result.reason);
       const error = new Error(result?.reason || "登录态文章接口不可用");
       error.accessDenied = Boolean(result?.accessDenied);
       error.truncated = Boolean(result?.truncated);
@@ -517,7 +532,7 @@ async function probeArticleApiAccess(probeLink) {
   }, {
     attempts: 2,
     signal: session.controller?.signal,
-    shouldRetry: (error) => !session.cancelled && !error.accessDenied && !error.truncated,
+    shouldRetry: (error) => !session.cancelled && !(error instanceof SiteAccessRestrictionError) && !error.accessDenied && !error.truncated,
     onRetry: ({ error }) => addLog(`文章接口校验失败：${error.message}；正在重试`, "neutral")
   });
   if (!probe.anonymousDenied) throw new Error("无法证明文章接口只向当前登录会话返回正文");
@@ -540,7 +555,7 @@ async function readProbePage(probeLink) {
   }, {
     attempts: 2,
     signal: session.controller?.signal,
-    shouldRetry: (error) => !session.cancelled && !error.accessDenied
+    shouldRetry: (error) => !session.cancelled && !(error instanceof SiteAccessRestrictionError) && !error.accessDenied
   });
 }
 
@@ -553,6 +568,7 @@ async function decideArticleSource(queue) {
   try {
     probe = await probeArticleApiAccess(probeLink);
   } catch (error) {
+    if (error instanceof SiteAccessRestrictionError) throw error;
     return planArticleSource({ probeFailure: error.message || String(error) });
   }
 
@@ -562,6 +578,7 @@ async function decideArticleSource(queue) {
     apiArticle = assertExpectedArticleResult(probe.article, probeLink.sectionId, session.columnId);
     pageArticle = await readProbePage(probeLink);
   } catch (error) {
+    if (error instanceof SiteAccessRestrictionError) throw error;
     return planArticleSource({ probeFailure: error.message || String(error) });
   }
 
@@ -575,6 +592,7 @@ async function processArticleApiQueue(queue) {
   if (session.articleSourceMode === "page") return processPageQueue(queue);
   if (session.articleSourceMode !== "api") {
     const plan = await decideArticleSource(queue);
+    ui.sourceMethod.textContent = plan.headline;
     addLog(plan.headline, plan.mode === "api" ? "success" : "neutral");
     if (plan.detail) addLog(plan.detail, "neutral");
     session.articleSourceMode = plan.mode;
@@ -585,8 +603,9 @@ async function processArticleApiQueue(queue) {
   const pending = queue.filter((link) => !session.completedIds.has(link.sectionId));
   const pageFallback = [];
   let sourceFailure = null;
+  let restriction = null;
   await mapWithConcurrency(pending, 4, async (link) => {
-    if (session.cancelled) return;
+    if (session.cancelled || restriction) return;
     if (sourceFailure) { pageFallback.push(link); return; }
     setState("正在读取正文", `${session.articles.length} / ${session.expectedArticleCount ?? session.knownLinks.length} · ${link.title}`);
     try {
@@ -597,6 +616,10 @@ async function processArticleApiQueue(queue) {
         sectionId: link.sectionId
       });
       if (!article?.ok) {
+        if (restrictedHttpStatus(article?.status)) {
+          restriction = new SiteAccessRestrictionError(article.reason || `HTTP ${article.status}`);
+          return;
+        }
         addLog(`${link.title}：${article?.reason || "文章接口没有返回正文"}，将改用正常页面读取`, "neutral");
         pageFallback.push(link);
         if (article?.status === 429 || article?.accessDenied) sourceFailure = article.reason;
@@ -610,9 +633,11 @@ async function processArticleApiQueue(queue) {
       pageFallback.push(link);
     }
   });
+  if (restriction) throw restriction;
   if (session.cancelled || !pageFallback.length) return;
   if (sourceFailure) session.articleSourceMode = "page";
   addLog(`${pageFallback.length} 篇接口正文不可用，改用逐篇页面提取${sourceFailure ? `：${sourceFailure}` : ""}`, "neutral");
+  ui.sourceMethod.textContent = `部分文章改用逐篇页面读取${sourceFailure ? `：${sourceFailure}` : ""}`;
   const fallbackIds = new Set(pageFallback.map((link) => link.sectionId));
   await processPageQueue(pending.filter((link) => fallbackIds.has(link.sectionId)), false);
 }
@@ -621,6 +646,7 @@ async function processQueue(queue) {
   if (session.articleApiTabId && /^c_\d+$/.test(String(session.columnId || ""))) {
     return processArticleApiQueue(queue);
   }
+  ui.sourceMethod.textContent = "逐篇读取正文：当前来源页没有可用的正文接口";
   return processPageQueue(queue);
 }
 
@@ -806,6 +832,10 @@ async function runExportAttempt() {
     await processQueue(nextQueue());
   } catch (error) {
     processingError = error;
+    if (error instanceof SiteAccessRestrictionError) {
+      session.controller.abort(abortError("访问受限，停止新的请求"));
+      ui.sourceMethod.textContent = error.message;
+    }
     setError(error.message || String(error));
   }
   session.failures = collectUnexportedArticles({

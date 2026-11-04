@@ -68,17 +68,16 @@ export function inferPaidColumnInfo(document, pageUrl) {
   const direct = parsePaidColumnUrl(pageUrl);
   if (direct?.columnId) return direct;
 
-  const candidateUrls = [];
-  document.querySelectorAll('link[rel="canonical"][href],meta[property="og:url"][content],a[href]').forEach((element) => {
+  for (const element of document.querySelectorAll('link[rel="canonical"][href],meta[property="og:url"][content],a[href]')) {
     const value = element.getAttribute("href") || element.getAttribute("content");
-    if (!value) return;
+    if (!value) continue;
+    let candidate;
     try {
-      candidateUrls.push(new URL(value, pageUrl).href);
+      candidate = new URL(value, pageUrl).href;
     } catch {
       // Ignore malformed page-owned URLs.
+      continue;
     }
-  });
-  for (const candidate of candidateUrls) {
     const parsed = parsePaidColumnUrl(candidate);
     if (!parsed) continue;
     if (direct?.sectionId && parsed.columnId) {
@@ -206,12 +205,13 @@ function scoreContent(element) {
 }
 
 export function selectContentRoot(document) {
-  const candidates = [];
+  let best = null;
+  let bestScore = -1;
   for (const element of document.querySelectorAll(CONTENT_SELECTORS.join(","))) {
-    candidates.push({ element, score: scoreContent(element) });
+    const score = scoreContent(element);
+    if (score > bestScore) { best = element; bestScore = score; }
   }
-  candidates.sort((a, b) => b.score - a.score);
-  return candidates[0]?.score >= 0 ? candidates[0].element : null;
+  return best;
 }
 
 function bestImageSource(image, pageUrl) {
