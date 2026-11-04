@@ -14,9 +14,10 @@ test("关闭自动恢复后保留错误且不新建替代页", async () => {
   const events = [];
   const worker = await createPageWorker({
     tabs: {
-      create: async () => { events.push("create"); return 42; },
-      close: async (id) => { events.push(`close:${id}`); },
-      forget: (id) => { events.push(`forget:${id}`); }
+      create: async () => {
+        events.push("create");
+        return { id: 42, close: async () => { events.push("close:42"); } };
+      }
     },
     isStopped: () => false,
     onRecovery: () => assert.fail("恢复已关闭"),
@@ -28,16 +29,17 @@ test("关闭自动恢复后保留错误且不新建替代页", async () => {
     return true;
   });
   await worker.close();
-  assert.deepEqual(events, ["create", "forget:42"]);
+  assert.deepEqual(events, ["create", "close:42"]);
 });
 
 test("其他标签页错误原样上报，不替换仍存在的工作页", async () => {
   let creates = 0;
   const worker = await createPageWorker({
     tabs: {
-      create: async () => { creates += 1; return 42; },
-      close: async (id) => assert.equal(id, 42),
-      forget: () => assert.fail("不能放弃有效工作页")
+      create: async () => {
+        creates += 1;
+        return { id: 42, close: async () => {} };
+      }
     },
     isStopped: () => false,
     onRecovery: () => assert.fail("不能重建")

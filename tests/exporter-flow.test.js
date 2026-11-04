@@ -69,6 +69,7 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
   const fetchCalls = [];
   const createdBlobs = [];
   const tabActions = [];
+  const replacementListeners = new Set();
   let peakTemporaryTabs = 0;
   let nextTabId = 10;
   let clock = Date.UTC(2026, 0, 1);
@@ -124,11 +125,22 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
     if (held) held.reject(new Error(`No tab with id: ${id}.`));
   }
 
+  function replaceTab(id) {
+    const replacement = { ...tabById(id), id: nextTabId++ };
+    tabs.delete(id);
+    tabs.set(replacement.id, replacement);
+    for (const listener of replacementListeners) listener(replacement.id, id);
+    const held = heldRequests.get(id);
+    heldRequests.delete(id);
+    if (held) held.reject(new Error(`No tab with id: ${id}.`));
+    return replacement.id;
+  }
+
   async function tabAction(action, id, details = {}) {
     const event = { action, id, url: tabs.get(id)?.url, ...details };
     tabActions.push(event);
     await onTabAction?.(event, {
-      loseTab,
+      loseTab, replaceTab,
       stop: () => dom.window.document.querySelector("#stop-button").click()
     });
   }
@@ -158,6 +170,10 @@ async function createFixture(t, { count = 1, images = false, downloadError = nul
 
   context.chrome = {
     tabs: {
+      onReplaced: {
+        addListener: (listener) => replacementListeners.add(listener),
+        removeListener: (listener) => replacementListeners.delete(listener)
+      },
       get: async (id) => {
         await tabAction("get", id);
         return { ...tabById(id) };
@@ -461,4 +477,133 @@ test("初始建页期间停止，关闭迟到页且不再创建余下读取页",
   assert.equal(creates, 2);
   assert.equal(fixture.temporaryTabCount(), 0);
   assert.equal(fixture.extractCalls.length, 0);
+});
+
+for (const replacedAt of ["update", "get", "PROBE_ARTICLE", "EXTRACT_ARTICLE"]) {
+  test(`读取页在 ${replacedAt} 更换 ID 后接管现有页，不增开第五页`, async (t) => {
+    let replaced = false;
+    const fixture = await createFixture(t, {
+      count: 12,
+      onTabAction(event, { replaceTab }) {
+        if (replaced || !event.url?.endsWith("/section/201")) return;
+        if (event.action !== replacedAt && event.messageType !== replacedAt) return;
+        replaced = true;
+        replaceTab(event.id);
+      }
+    });
+    await fixture.act("start-button");
+    assert.equal(replaced, true);
+    assert.equal(archiveInfo(fixture.downloads[0]).complete, true);
+    assert.equal(fixture.peakTemporaryTabCount(), 4, "替换后的页面仍占原来的一个名额");
+    assert.equal(fixture.tabActions.filter((event) => event.action === "create").length, 4);
+    assert.equal(fixture.temporaryTabCount(), 0, "结束时替换过 ID 的页也必须关闭");
+    assert.equal(fixture.sourceTabExists(), true);
+    assert.equal(fixture.extractCalls.length, 12);
+    assert.match(fixture.element("activity-log").textContent, /编号.*变更.*接管/);
+  });
+}
+
+test("仅收到 No tab 错误但原页仍在时先回收原页，再创建替代页", async (t) => {
+  let failed = false;
+  const fixture = await createFixture(t, {
+    count: 12,
+    onTabAction(event) {
+      if (failed || event.action !== "update" || !event.url?.endsWith("/section/201")) return;
+      failed = true;
+      throw new Error(`No tab with id: ${event.id}.`);
+    }
+  });
+  await fixture.act("start-button");
+  assert.equal(failed, true);
+  assert.equal(archiveInfo(fixture.downloads[0]).complete, true);
+  assert.equal(fixture.peakTemporaryTabCount(), 4);
+  assert.equal(fixture.temporaryTabCount(), 0);
+  assert.equal(fixture.tabActions.filter((event) => event.action === "create").length, 5);
+});
+
+test("每篇文章都更换页 ID 仍一遍完成，不消耗真正失效页的重建次数", async (t) => {
+  const replacedArticles = new Set();
+  const fixture = await createFixture(t, {
+    count: 20,
+    onTabAction(event, { replaceTab }) {
+      if (event.action !== "update" || replacedArticles.has(event.url)) return;
+      replacedArticles.add(event.url);
+      replaceTab(event.id);
+    }
+  });
+  await fixture.act("start-button");
+  assert.equal(replacedArticles.size, 20);
+  assert.equal(archiveInfo(fixture.downloads[0]).complete, true);
+  assert.equal(fixture.extractCalls.length, 20);
+  assert.equal(fixture.tabActions.filter((event) => event.action === "create").length, 4);
+  assert.equal(fixture.peakTemporaryTabCount(), 4);
+  assert.equal(fixture.temporaryTabCount(), 0);
+});
+
+test("停止与页 ID 更换同时发生时回收新 ID，重试不累积读取页", async (t) => {
+  let stopped = false;
+  const fixture = await createFixture(t, {
+    count: 12,
+    onTabAction(event, { replaceTab, stop }) {
+      if (stopped || event.action !== "update" || !event.url?.endsWith("/section/205")) return;
+      stopped = true;
+      replaceTab(event.id);
+      stop();
+    }
+  });
+  await fixture.act("start-button");
+  assert.equal(stopped, true);
+  assert.equal(archiveInfo(fixture.downloads[0]).complete, false);
+  assert.equal(fixture.temporaryTabCount(), 0);
+  await fixture.act("retry-button");
+  assert.equal(archiveInfo(fixture.downloads[1]).complete, true);
+  assert.equal(fixture.extractCalls.length, 12);
+  assert.equal(fixture.peakTemporaryTabCount(), 4);
+  assert.equal(fixture.temporaryTabCount(), 0);
+});
+
+test("关闭读取页时 ID 再次变更也回收新页", async (t) => {
+  let replaced = false;
+  const fixture = await createFixture(t, {
+    count: 8,
+    onTabAction(event, { replaceTab }) {
+      if (replaced || event.action !== "remove") return;
+      replaced = true;
+      replaceTab(event.id);
+    }
+  });
+  await fixture.act("start-button");
+  assert.equal(replaced, true);
+  assert.equal(archiveInfo(fixture.downloads[0]).complete, true);
+  assert.equal(fixture.temporaryTabCount(), 0);
+});
+
+test("旧页回收被拒绝时不增开替代页，重试前必须先清理遗留页", async (t) => {
+  let failedId = null;
+  let blockClose = true;
+  const fixture = await createFixture(t, {
+    count: 20,
+    onTabAction(event) {
+      if (failedId === null && event.action === "update" && event.url?.endsWith("/section/205")) {
+        failedId = event.id;
+        throw new Error(`No tab with id: ${event.id}.`);
+      }
+      if (blockClose && event.action === "remove" && event.id === failedId) throw new Error("合成测试：浏览器拒绝关闭读取页");
+    }
+  });
+  await fixture.act("start-button");
+  assert.notEqual(failedId, null);
+  assert.equal(archiveInfo(fixture.downloads[0]).complete, false);
+  assert.match(fixture.element("error-message").textContent, /拒绝关闭读取页/);
+  assert.equal(fixture.temporaryTabCount(), 1);
+  assert.equal(fixture.tabActions.filter((event) => event.action === "create").length, 4);
+  await fixture.act("retry-button");
+  assert.match(fixture.element("error-message").textContent, /拒绝关闭读取页/);
+  assert.equal(fixture.tabActions.filter((event) => event.action === "create").length, 4);
+  blockClose = false;
+  await fixture.act("retry-button");
+  assert.equal(archiveInfo(fixture.downloads.at(-1)).complete, true);
+  assert.equal(fixture.peakTemporaryTabCount(), 4);
+  assert.equal(fixture.temporaryTabCount(), 0);
+  assert.equal(fixture.extractCalls.length, 20);
 });

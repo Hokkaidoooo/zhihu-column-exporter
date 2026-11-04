@@ -1732,25 +1732,28 @@
   }
   async function createPageWorker({ tabs, isStopped, onRecovery, recoveryLimit = PAGE_TAB_RECOVERY_LIMIT }) {
     if (!Number.isInteger(recoveryLimit) || recoveryLimit < 0) throw new TypeError("recoveryLimit \u5FC5\u987B\u662F\u975E\u8D1F\u6574\u6570");
-    let tabId = null;
+    let tab = null;
     let recoveries = 0;
     async function close() {
-      if (tabId === null) return;
-      const closingId = tabId;
-      await tabs.close(closingId);
-      if (tabId === closingId) tabId = null;
+      if (tab === null) return;
+      const closing = tab;
+      await closing.close();
+      if (tab === closing) tab = null;
     }
     async function open() {
       if (isStopped()) throw new Error("\u5BFC\u51FA\u5DF2\u505C\u6B62");
-      tabId = await tabs.create();
+      tab = await tabs.create();
       if (!isStopped()) return;
       await close();
       throw new Error("\u5BFC\u51FA\u5DF2\u505C\u6B62");
     }
     async function recover(error) {
-      const previousId = tabId;
-      tabId = null;
-      tabs.forget(previousId);
+      const previousId = tab.id;
+      try {
+        await close();
+      } catch (closeError) {
+        throw new PageTabRecoveryError(`\u65E0\u6CD5\u56DE\u6536\u65E7\u8BFB\u53D6\u6807\u7B7E\u9875\uFF0C\u5DF2\u505C\u6B62\u8BFB\u53D6\uFF1A${closeError.message || closeError}`, { cause: closeError });
+      }
       if (recoveries >= recoveryLimit) {
         throw new PageTabRecoveryError(`\u8BFB\u53D6\u6807\u7B7E\u9875\u5DF2\u5931\u6548\uFF0C\u8FBE\u5230\u672C\u8F6E\u6062\u590D\u4E0A\u9650\uFF08\u6BCF\u8DEF ${recoveryLimit} \u6B21\uFF09\uFF0C\u5DF2\u505C\u6B62\u8BFB\u53D6\uFF1B\u53EF\u4FDD\u5B58\u7ED3\u679C\u540E\u91CD\u8BD5\u672A\u5B8C\u6210`, { cause: error });
       }
@@ -1761,14 +1764,16 @@
         if (isStopped()) throw createError;
         throw new PageTabRecoveryError(`\u65E0\u6CD5\u91CD\u5EFA\u8BFB\u53D6\u6807\u7B7E\u9875\uFF0C\u5DF2\u505C\u6B62\u8BFB\u53D6\uFF1A${createError.message || createError}`, { cause: createError });
       }
-      onRecovery({ previousId, tabId, attempt: recoveries, limit: recoveryLimit });
+      onRecovery({ previousId, tabId: tab.id, attempt: recoveries, limit: recoveryLimit });
     }
     async function run(operation) {
       while (!isStopped()) {
+        const readingId = tab.id;
         try {
-          return await operation(tabId);
+          return await operation(readingId);
         } catch (error) {
-          if (isStopped() || !isMissingTabError(error, tabId)) throw error;
+          if (isStopped() || !isMissingTabError(error, readingId)) throw error;
+          if (tab.id !== readingId) continue;
           await recover(error);
         }
       }
@@ -1776,6 +1781,72 @@
     }
     await open();
     return { run, close };
+  }
+
+  // src/temporary-tabs.js
+  function createTemporaryTabs({ tabs, limit, onReplaced, onCloseError }) {
+    if (!Number.isInteger(limit) || limit < 1) throw new TypeError("limit \u5FC5\u987B\u662F\u6B63\u6574\u6570");
+    const owned = /* @__PURE__ */ new Set();
+    const pendingReplacements = /* @__PURE__ */ new Map();
+    let creating = 0;
+    tabs.onReplaced.addListener((addedId, removedId) => {
+      for (const entry of owned) {
+        if (entry.id !== removedId) continue;
+        entry.id = addedId;
+        onReplaced({ previousId: removedId, tabId: addedId });
+        return;
+      }
+      if (creating) pendingReplacements.set(removedId, addedId);
+    });
+    function track(id) {
+      const entry = { id };
+      let closing = null;
+      async function remove() {
+        while (owned.has(entry)) {
+          const closingId = entry.id;
+          try {
+            await tabs.remove(closingId);
+          } catch (error) {
+            if (!isMissingTabError(error, closingId)) {
+              onCloseError(error);
+              throw error;
+            }
+          }
+          if (entry.id === closingId) owned.delete(entry);
+        }
+      }
+      entry.close = () => {
+        if (!closing) closing = remove().finally(() => {
+          closing = null;
+        });
+        return closing;
+      };
+      owned.add(entry);
+      return { get id() {
+        return entry.id;
+      }, close: entry.close };
+    }
+    async function create(url = "about:blank") {
+      if (owned.size + creating >= limit) throw new Error(`\u8BFB\u53D6\u6807\u7B7E\u9875\u5C1A\u672A\u56DE\u6536\uFF0C\u4E0D\u80FD\u8D85\u8FC7 ${limit} \u9875`);
+      creating += 1;
+      try {
+        const tab = await tabs.create({ url, active: false });
+        let id = tab.id;
+        while (pendingReplacements.has(id)) id = pendingReplacements.get(id);
+        const handle = track(id);
+        if (id !== tab.id) onReplaced({ previousId: tab.id, tabId: id });
+        return handle;
+      } finally {
+        creating -= 1;
+        if (!creating) pendingReplacements.clear();
+      }
+    }
+    async function closeAll() {
+      const results = await Promise.allSettled([...owned].map((entry) => entry.close()));
+      const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+      if (failures.length) throw new AggregateError(failures, `\u8BFB\u53D6\u6807\u7B7E\u9875\u56DE\u6536\u5931\u8D25\uFF1A${failures.map((error) => error.message || error).join("\uFF1B")}`);
+    }
+    return { create, closeAll };
   }
 
   // src/exporter.js
@@ -1809,21 +1880,14 @@
   var query = new URLSearchParams(location.search);
   var sourceTabId = query.has("tabId") ? Number(query.get("tabId")) : NaN;
   var sourceTab = null;
-  var activeTempTabIds = /* @__PURE__ */ new Set();
+  var temporaryTabs = createTemporaryTabs({
+    tabs: chrome.tabs,
+    limit: PAGE_MODE_TAB_COUNT,
+    onReplaced: ({ previousId, tabId }) => addLog(`\u8BFB\u53D6\u6807\u7B7E\u9875\u7F16\u53F7\u5DF2\u53D8\u66F4\uFF08${previousId} \u2192 ${tabId}\uFF09\uFF0C\u5DF2\u63A5\u7BA1\u539F\u9875\u9762\u7EE7\u7EED\u8BFB\u53D6`, "neutral"),
+    onCloseError: (error) => addLog(`\u8BFB\u53D6\u6807\u7B7E\u9875\u5173\u95ED\u5931\u8D25\uFF1A${error.message || error}`, "error")
+  });
   var lastArchive = null;
   var session = freshSession();
-  async function closeTempTab(tabId) {
-    if (!Number.isInteger(tabId)) return;
-    try {
-      await chrome.tabs.remove(tabId);
-    } catch (error) {
-      if (!isMissingTabError(error, tabId)) {
-        addLog(`\u8BFB\u53D6\u6807\u7B7E\u9875\u5173\u95ED\u5931\u8D25\uFF1A${error.message || error}`, "error");
-        throw error;
-      }
-    }
-    activeTempTabIds.delete(tabId);
-  }
   function freshSession() {
     return {
       running: false,
@@ -1954,15 +2018,14 @@
     return chrome.tabs.sendMessage(tab.id, message);
   }
   async function visitPage(url, messageType) {
-    const tab = await chrome.tabs.create({ url, active: false });
+    const tab = await temporaryTabs.create(url);
     const expectedPage = expectedPageFromUrl(url);
-    activeTempTabIds.add(tab.id);
     try {
       await ensureExpectedPage(tab.id, expectedPage);
       if (session.cancelled) throw new Error("\u5BFC\u51FA\u5DF2\u505C\u6B62");
       return await sendToTab(tab.id, { type: messageType }, expectedPage);
     } finally {
-      await closeTempTab(tab.id);
+      await tab.close();
     }
   }
   function addKnownLinks(links) {
@@ -2158,26 +2221,17 @@
       }
     };
     const workers = [];
-    const tabs = {
-      async create() {
-        const tab = await chrome.tabs.create({ url: "about:blank", active: false });
-        activeTempTabIds.add(tab.id);
-        return tab.id;
-      },
-      close: closeTempTab,
-      forget: (tabId) => activeTempTabIds.delete(tabId)
-    };
     try {
       for (let index = 0; index < tabCount; index += 1) {
         workers.push(await createPageWorker({
-          tabs,
+          tabs: temporaryTabs,
           isStopped: () => session.cancelled || Boolean(stopReason),
           onRecovery: ({ attempt, limit }) => addLog(`\u8BFB\u53D6\u6807\u7B7E\u9875\u5DF2\u5931\u6548\uFF0C\u5DF2\u5728\u539F\u5E76\u53D1\u540D\u989D\u5185\u91CD\u5EFA\u5E76\u7EE7\u7EED\u5F53\u524D\u6587\u7AE0\uFF08${attempt} / ${limit}\uFF09`, "neutral")
         }));
       }
       await Promise.all(workers.map(runWorker));
     } finally {
-      await Promise.all(workers.map((worker) => worker.close()));
+      await temporaryTabs.closeAll();
     }
     if (stopReason) throw stopReason;
   }
@@ -2553,6 +2607,7 @@ ${item.url}
   async function runExportAttempt() {
     let processingError = null;
     try {
+      await temporaryTabs.closeAll();
       if (!session.knownLinks.length) await discoverCatalog();
       await processQueue(nextQueue());
     } catch (error) {
@@ -2599,7 +2654,7 @@ ${item.url}
   async function stopExport() {
     session.cancelled = true;
     setState("\u6B63\u5728\u505C\u6B62", "\u5DF2\u5B8C\u6210\u7684\u6587\u7AE0\u4F1A\u4FDD\u7559");
-    await Promise.all([...activeTempTabIds].map((tabId) => closeTempTab(tabId)));
+    await temporaryTabs.closeAll();
   }
   ui.start.addEventListener("click", startExport);
   ui.stop.addEventListener("click", () => {

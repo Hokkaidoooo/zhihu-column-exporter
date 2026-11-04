@@ -32,6 +32,7 @@ import {
   pageModeAnnouncement,
   pageModeStopMessage,
   pageModeTabCount,
+  PAGE_MODE_TAB_COUNT,
   planArticleSource,
   remainingTimeText,
   shouldStopPageMode
@@ -39,6 +40,7 @@ import {
 import { assertExpectedArticleResult, expectedPageFromUrl, pageMatchesExpectation } from "./page-identity.js";
 import { ensureExpectedTabPage, waitForExpectedTabUrl, waitForStableTab } from "./tab-lifecycle.js";
 import { createPageWorker, isMissingTabError, PageTabRecoveryError } from "./page-worker.js";
+import { createTemporaryTabs } from "./temporary-tabs.js";
 
 const PAGE_READY_ATTEMPTS = 200;
 const PAGE_READY_INTERVAL_MS = 100;
@@ -73,22 +75,14 @@ createIcons({
 const query = new URLSearchParams(location.search);
 const sourceTabId = query.has("tabId") ? Number(query.get("tabId")) : NaN;
 let sourceTab = null;
-const activeTempTabIds = new Set();
+const temporaryTabs = createTemporaryTabs({
+  tabs: chrome.tabs,
+  limit: PAGE_MODE_TAB_COUNT,
+  onReplaced: ({ previousId, tabId }) => addLog(`读取标签页编号已变更（${previousId} → ${tabId}），已接管原页面继续读取`, "neutral"),
+  onCloseError: (error) => addLog(`读取标签页关闭失败：${error.message || error}`, "error")
+});
 let lastArchive = null;
 let session = freshSession();
-
-async function closeTempTab(tabId) {
-  if (!Number.isInteger(tabId)) return;
-  try {
-    await chrome.tabs.remove(tabId);
-  } catch (error) {
-    if (!isMissingTabError(error, tabId)) {
-      addLog(`读取标签页关闭失败：${error.message || error}`, "error");
-      throw error;
-    }
-  }
-  activeTempTabIds.delete(tabId);
-}
 
 function freshSession() {
   return {
@@ -236,15 +230,14 @@ async function sendToArticleApiTab(message) {
 }
 
 async function visitPage(url, messageType) {
-  const tab = await chrome.tabs.create({ url, active: false });
+  const tab = await temporaryTabs.create(url);
   const expectedPage = expectedPageFromUrl(url);
-  activeTempTabIds.add(tab.id);
   try {
     await ensureExpectedPage(tab.id, expectedPage);
     if (session.cancelled) throw new Error("导出已停止");
     return await sendToTab(tab.id, { type: messageType }, expectedPage);
   } finally {
-    await closeTempTab(tab.id);
+    await tab.close();
   }
 }
 
@@ -466,26 +459,17 @@ async function processPageQueue(queue, includeDiscovered = true) {
   };
 
   const workers = [];
-  const tabs = {
-    async create() {
-      const tab = await chrome.tabs.create({ url: "about:blank", active: false });
-      activeTempTabIds.add(tab.id);
-      return tab.id;
-    },
-    close: closeTempTab,
-    forget: (tabId) => activeTempTabIds.delete(tabId)
-  };
   try {
     for (let index = 0; index < tabCount; index += 1) {
       workers.push(await createPageWorker({
-        tabs,
+        tabs: temporaryTabs,
         isStopped: () => session.cancelled || Boolean(stopReason),
         onRecovery: ({ attempt, limit }) => addLog(`读取标签页已失效，已在原并发名额内重建并继续当前文章（${attempt} / ${limit}）`, "neutral")
       }));
     }
     await Promise.all(workers.map(runWorker));
   } finally {
-    await Promise.all(workers.map((worker) => worker.close()));
+    await temporaryTabs.closeAll();
   }
   if (stopReason) throw stopReason;
 }
@@ -896,6 +880,7 @@ async function finishExport(partial = false) {
 async function runExportAttempt() {
   let processingError = null;
   try {
+    await temporaryTabs.closeAll();
     if (!session.knownLinks.length) await discoverCatalog();
     await processQueue(nextQueue());
   } catch (error) {
@@ -944,7 +929,7 @@ async function startExport() {
 async function stopExport() {
   session.cancelled = true;
   setState("正在停止", "已完成的文章会保留");
-  await Promise.all([...activeTempTabIds].map((tabId) => closeTempTab(tabId)));
+  await temporaryTabs.closeAll();
 }
 
 ui.start.addEventListener("click", startExport);
